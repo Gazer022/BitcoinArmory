@@ -721,8 +721,13 @@ map<uint32_t, uint32_t> BtcWallet::computeScrAddrMapHistSummary()
 
    auto addrMap = scrAddrMap_.get();
 
-   LMDBEnv::Transaction tx;
-   bdvPtr_->getDB()->beginDBTransaction(&tx, SSH, LMDB::ReadOnly);
+   LMDBEnv::Transaction sshtx;
+   bdvPtr_->getDB()->beginDBTransaction(&sshtx, SSH, LMDB::ReadOnly);
+   
+   LMDBEnv::Transaction subtx;
+   bdvPtr_->getDB()->beginDBTransaction(&subtx, SUBSSH, LMDB::ReadOnly);
+
+   
    for (auto& scrAddrPair : *addrMap)
    {
       scrAddrPair.second->mapHistory();
@@ -938,7 +943,7 @@ void BtcWallet::needsRefresh(bool refresh)
 
    //notify BDV
    if (refresh && isRegistered_)
-      bdvPtr_->flagRefresh(BDV_refreshAndRescan, walletID_); 
+      bdvPtr_->flagRefresh(BDV_refreshAndRescan, walletID_);
 
    //call custom callback
    doneRegisteringCallback_();

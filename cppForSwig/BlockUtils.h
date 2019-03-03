@@ -126,6 +126,8 @@ private:
    exception_ptr exceptPtr_ = nullptr;
 
    unsigned checkTransactionCount_ = 0;
+   
+   mutable shared_ptr<mutex> nodeStatusPollMutex_;
 
 public:
    typedef function<void(BDMPhase, double,unsigned, unsigned)> ProgressCallback;   
@@ -184,6 +186,8 @@ private:
       const ProgressCallback &progress,
       bool doRescan=false
    );
+
+   void pollNodeStatus() const;
    
 public:
    Blockchain::ReorganizationState readBlkFileUpdate(
@@ -194,7 +198,7 @@ public:
                             ScrAddrFilter& scrAddrData,
                             bool updateSDBI = true);
 
-   uint32_t getTopBlockHeight() const {return blockchain_->top().getBlockHeight();}
+   uint32_t getTopBlockHeight() const {return blockchain_->top()->getBlockHeight();}
       
    uint8_t getValidDupIDForHeight(uint32_t blockHgt) const
    { return iface_->getValidDupIDForHeight(blockHgt); }

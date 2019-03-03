@@ -24,6 +24,15 @@
 #include "ReentrantLock.h"
 
 ////////////////////////////////////////////////////////////////////////////////
+struct FeeEstimateResult
+{
+   bool smartFee_ = false;
+   float feeByte_ = 0;
+
+   string error_;
+};
+
+////////////////////////////////////////////////////////////////////////////////
 class NodeRPC : protected Lockable
 {
 private:
@@ -35,23 +44,50 @@ private:
    bool goodNode_ = false; 
 
    NodeChainState nodeChainState_;
+   function<void(void)> nodeStatusLambda_;
+
+   RpcStatus previousState_ = RpcStatus_Disabled;
 
 private:
    string getAuthString(void);
    string getDatadir(void);
 
+   void callback(void)
+   {
+      if (nodeStatusLambda_)
+         nodeStatusLambda_();
+   }
+
 public:
    NodeRPC(BlockDataManagerConfig&);
    
-   RpcStatus testConnection(void);
+   RpcStatus testConnection();
    RpcStatus setupConnection(void);
    float getFeeByte(unsigned);
+   FeeEstimateResult getFeeByteSmart(
+      unsigned confTarget, string& strategy);
    void shutdown(void);
 
    bool updateChainStatus(void);
    const NodeChainState& getChainStatus(void) const;   
    void waitOnChainSync(function<void(void)>);
    string broadcastTx(const BinaryData&) const;
+
+   void registerNodeStatusLambda(function<void(void)> lbd) { nodeStatusLambda_ = lbd; }
+
+   virtual bool canPool(void) const { return true; }
+};
+
+////////////////////////////////////////////////////////////////////////////////
+class NodeRPC_UnitTest : public NodeRPC
+{
+public:
+
+   NodeRPC_UnitTest(BlockDataManagerConfig& bdmc) :
+      NodeRPC(bdmc)
+   {}
+
+   bool canPool(void) const { return false; }
 };
 
 #endif

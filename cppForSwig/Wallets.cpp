@@ -1275,6 +1275,20 @@ AddressEntryType AssetWallet::getAddrTypeForIndex(int index)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+AddressEntryType AssetWallet::getAddrTypeForIndex(int index, 
+   const BinaryData& h160)
+{
+   ReentrantLock lock(this);
+   auto asset = getAssetForIndex(index);
+   auto addrType = asset->getAddressTypeForHash(h160);
+
+   if (addrType == AddressEntryType_Default)
+      return getDefaultAddressType();
+
+   return addrType;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 shared_ptr<AddressEntry> AssetWallet_Single::getAddressEntryForAsset(
    shared_ptr<AssetEntry> assetPtr, AddressEntryType ae_type)
 {
@@ -1371,6 +1385,17 @@ shared_ptr<AddressEntry> AssetWallet::getAddressEntryForIndex(int index)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+shared_ptr<AddressEntry> AssetWallet::getAddressEntryForIndex(int index,
+   const BinaryDataRef& h160)
+{
+   ReentrantLock lock(this);
+
+   auto asset = getAssetForIndex(index);
+   auto addrType = asset->getAddressTypeForHash(h160);
+   return getAddressEntryForAsset(asset, addrType);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void AssetWallet::writeAssetEntry(shared_ptr<AssetEntry> entryPtr)
 {
    if (!entryPtr->needsCommit())
@@ -1457,18 +1482,19 @@ void AssetWallet_Single::fillHashIndexMap()
       for (auto& entry : assets_)
       {
          auto assetSingle = dynamic_pointer_cast<AssetEntry_Single>(entry.second);
+         auto&& hashMap = assetSingle->getScriptHashMap();
          
          hashMaps_.hashUncompressed_.insert(make_pair(
-            assetSingle->getHash160Uncompressed().getRef(), assetSingle->getId()));
+            hashMap[ScriptHash_P2PKH_Uncompressed], assetSingle->getId()));
          
          hashMaps_.hashCompressed_.insert(make_pair(
-            assetSingle->getHash160Compressed().getRef(), assetSingle->getId()));
+            hashMap[ScriptHash_P2PKH_Compressed], assetSingle->getId()));
          
          hashMaps_.hashNestedP2WPKH_.insert(make_pair(
-            assetSingle->getWitnessScriptH160().getRef(), assetSingle->getId()));
+            hashMap[ScriptHash_P2WPKH], assetSingle->getId()));
 
          hashMaps_.hashNestedP2PK_.insert(make_pair(
-            assetSingle->getP2PKScriptH160().getRef(), assetSingle->getId()));
+            hashMap[ScriptHash_Nested_P2PK], assetSingle->getId()));
       }
 
       lastKnownIndex_ = assets_.rbegin()->first;
@@ -1953,6 +1979,12 @@ vector<shared_ptr<AssetEntry>> DerivationScheme_ArmoryLegacy::extendChain(
       auto&& nextPubkey = CryptoECDSA().ComputeChainedPublicKey(
          pubkeyData, chainCode_, nullptr);
 
+      auto&& nextPubKey_2 = CryptoECDSA().ComputeChainedPublicKey(
+         pubkeyData, chainCode_, nullptr);
+
+      if (nextPubkey != nextPubKey_2)
+         throw runtime_error("failed pubkey derivation");
+
       //try to get priv key
       auto privkey = assetSingle->getPrivKey();
       SecureBinaryData nextPrivkey;
@@ -1962,6 +1994,9 @@ vector<shared_ptr<AssetEntry>> DerivationScheme_ArmoryLegacy::extendChain(
 
          nextPrivkey = move(CryptoECDSA().ComputeChainedPrivateKey(
             privkeyData, chainCode_, pubkeyData, nullptr));
+
+         if (!CryptoECDSA().CheckPubPrivKeyMatch(nextPrivkey, nextPubkey))
+            throw runtime_error("failed privkey derivation");
       }
       catch (AssetUnavailableException&)
       {
@@ -2327,7 +2362,7 @@ shared_ptr<ScriptRecipient> AddressEntry_P2WSH::getRecipient(
       throw WalletException("unexpected asset type");
    }
 
-   return make_shared<Recipient_PW2SH>(scriptHash, value);
+   return make_shared<Recipient_P2WSH>(scriptHash, value);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2627,7 +2662,7 @@ const BinaryData& AssetEntry_Single::getHash160Uncompressed() const
 {
    if (h160Uncompressed_.getSize() == 0)
       h160Uncompressed_ = 
-         move(BtcUtils::getHash160(pubkey_->getUncompressedKey()));
+         move(BtcUtils::getHash160_RunTwice(pubkey_->getUncompressedKey()));
 
    return h160Uncompressed_;
 }
@@ -2637,7 +2672,7 @@ const BinaryData& AssetEntry_Single::getHash160Compressed() const
 {
    if (h160Compressed_.getSize() == 0)
       h160Compressed_ =
-         move(BtcUtils::getHash160(pubkey_->getCompressedKey()));
+         move(BtcUtils::getHash160_RunTwice(pubkey_->getCompressedKey()));
 
    return h160Compressed_;
 }
@@ -2663,7 +2698,7 @@ const BinaryData& AssetEntry_Single::getWitnessScriptH160() const
 {
    if (witnessScriptH160_.getSize() == 0)
       witnessScriptH160_ =
-         move(BtcUtils::getHash160(getWitnessScript()));
+         move(BtcUtils::getHash160_RunTwice(getWitnessScript()));
 
    return witnessScriptH160_;
 }
@@ -2686,7 +2721,7 @@ const BinaryData& AssetEntry_Single::getP2PKScriptH160() const
 {
    if (p2pkScriptH160_.getSize() == 0)
       p2pkScriptH160_ =
-         move(BtcUtils::getHash160(getP2PKScript()));
+         move(BtcUtils::getHash160_RunTwice(getP2PKScript()));
 
    return p2pkScriptH160_;
 }
@@ -2695,7 +2730,7 @@ const BinaryData& AssetEntry_Single::getP2PKScriptH160() const
 AddressEntryType AssetEntry_Single::getAddressTypeForHash(
    BinaryDataRef hashRef) const
 {
-      auto& h160Unc = getHash160Uncompressed();
+   auto& h160Unc = getHash160Uncompressed();
    if (hashRef == h160Unc)
       return AddressEntryType_P2PKH;
    
@@ -2709,6 +2744,26 @@ AddressEntryType AssetEntry_Single::getAddressTypeForHash(
 
 
    return AddressEntryType_Default;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+map<ScriptHashType, BinaryDataRef> AssetEntry_Single::getScriptHashMap() const
+{
+   map<ScriptHashType, BinaryDataRef> result;
+
+   result.insert(make_pair(
+      ScriptHash_P2PKH_Uncompressed, getHash160Uncompressed().getRef()));
+
+   result.insert(make_pair(
+      ScriptHash_P2PKH_Compressed, getHash160Compressed().getRef()));
+
+   result.insert(make_pair(
+      ScriptHash_P2WPKH, getWitnessScriptH160().getRef()));
+
+   result.insert(make_pair(
+      ScriptHash_Nested_P2PK, getP2PKScriptH160().getRef()));
+
+   return result;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2764,7 +2819,7 @@ const BinaryData& AssetEntry_Multisig::getHash160() const
    if (h160_.getSize() == 0)
    {
       auto& msScript = getScript();
-      h160_ = move(BtcUtils::getHash160(msScript));
+      h160_ = move(BtcUtils::getHash160_RunTwice(msScript));
    }
 
    return h160_;
@@ -2779,7 +2834,7 @@ const BinaryData& AssetEntry_Multisig::getHash256() const
    if (h256_.getSize() == 0)
    {
       auto& msScript = getScript();
-      h256_ = move(BtcUtils::getSha256(msScript));
+      h256_ = move(BtcUtils::getSha256_RunTwice(msScript));
    }
 
    return h256_;
@@ -2792,7 +2847,7 @@ const BinaryData& AssetEntry_Multisig::getP2WSHScript() const
    {
       auto& hash256 = getHash256();
 
-      Recipient_PW2SH recipient(hash256, 0);
+      Recipient_P2WSH recipient(hash256, 0);
       auto& script = recipient.getSerializedScript();
 
       p2wshScript_ = move(script.getSliceCopy(9, script.getSize() - 9));
@@ -2808,7 +2863,7 @@ const BinaryData& AssetEntry_Multisig::getP2WSHScriptH160() const
    {
       auto& script = getP2WSHScript();
 
-      p2wshScriptH160_ = move(BtcUtils::getHash160(script));
+      p2wshScriptH160_ = move(BtcUtils::getHash160_RunTwice(script));
    }
 
    return p2wshScriptH160_;

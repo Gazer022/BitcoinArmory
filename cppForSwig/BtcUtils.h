@@ -35,6 +35,7 @@
 #include "ripemd.h"
 #include "UniversalTimer.h"
 #include "log.h"
+#include "bech32/ref/c++/segwit_addr.h"
 
 class LedgerEntryData;
 
@@ -106,7 +107,8 @@ typedef enum
    TXOUT_SCRIPT_P2SH,
    TXOUT_SCRIPT_NONSTANDARD,
    TXOUT_SCRIPT_P2WPKH,
-   TXOUT_SCRIPT_P2WSH
+   TXOUT_SCRIPT_P2WSH,
+   TXOUT_SCRIPT_OPRETURN
 }  TXOUT_SCRIPT_TYPE;
 
 typedef enum
@@ -129,9 +131,12 @@ typedef enum
   SCRIPT_PREFIX_HASH160=0x00,
   SCRIPT_PREFIX_P2SH=0x05,
   SCRIPT_PREFIX_HASH160_TESTNET=0x6f,
+  SCRIPT_PREFIX_P2WPKH = 0x90,
+  SCRIPT_PREFIX_P2WSH = 0x95,
   SCRIPT_PREFIX_P2SH_TESTNET=0xc4,
   SCRIPT_PREFIX_MULTISIG=0xfe,
   SCRIPT_PREFIX_NONSTD=0xff,
+  SCRIPT_PREFIX_OPRETURN=0x6a
 } SCRIPT_PREFIX;
 
 
@@ -989,10 +994,15 @@ public:
    // TXOUT_SCRIPT_MULTISIG,
    // TXOUT_SCRIPT_P2SH,
    // TXOUT_SCRIPT_NONSTANDARD,
+   // TXOUT_SCRIPT_P2WPKH,
+   // TXOUT_SCRIPT_P2WSH,
+   // TXOUT_SCRIPT_OPRETURN
    static TXOUT_SCRIPT_TYPE getTxOutScriptType(BinaryDataRef s)
    {
       size_t sz = s.getSize();
-      if (sz < 21)
+      if (sz > 0 && sz < 81 && s[0] == 0x6a)
+         return TXOUT_SCRIPT_OPRETURN;
+      else if (sz < 21)
          return TXOUT_SCRIPT_NONSTANDARD;
       else if (sz == 22 &&
          s[0] == 0x00 &&
@@ -2003,6 +2013,7 @@ public:
    static SecureBinaryData computeChainCode_Armory135(
       const SecureBinaryData& privateRoot);
 
+   /////////////////////////////////////////////////////////////////////////////
    static BinaryData getP2WPKHScript(const BinaryData& scriptHash)
    {
       if (scriptHash.getSize() != 20)
@@ -2019,6 +2030,7 @@ public:
       return bw.getData();
    }
 
+   /////////////////////////////////////////////////////////////////////////////
    static BinaryData getP2WSHScript(const BinaryData& scriptHash)
    {
       if (scriptHash.getSize() != 32)
@@ -2035,6 +2047,71 @@ public:
 
    static string base64_encode(const string&);
    static string base64_decode(const string&);
+
+   /////////////////////////////////////////////////////////////////////////////
+   static BinaryData getHash256_RunTwice(const BinaryData& data)
+   {
+      auto&& hash1 = getHash256(data);
+      auto&& hash2 = getHash256(data);
+
+      if (hash1 != hash2)
+         throw runtime_error("hash256 failure");
+
+      return hash1;
+   }
+
+   /////////////////////////////////////////////////////////////////////////////
+   static BinaryData getSha256_RunTwice(const BinaryData& data)
+   {
+      auto&& hash1 = getSha256(data);
+      auto&& hash2 = getSha256(data);
+
+      if (hash1 != hash2)
+         throw runtime_error("sha256 failure");
+
+      return hash1;
+   }
+
+   /////////////////////////////////////////////////////////////////////////////
+   static BinaryData getHash160_RunTwice(const BinaryData& data)
+   {
+      auto&& hash1 = getHash160(data);
+      auto&& hash2 = getHash160(data);
+
+      if (hash1 != hash2)
+         throw runtime_error("hash160 failure");
+
+      return hash1;
+   }
+
+   /////////////////////////////////////////////////////////////////////////////
+   static BinaryData bech32ToScript(const string& data, const string& prefix)
+   {
+      auto&& resultPair = segwit_addr::decode(prefix, data);
+      if (resultPair.first == -1 || resultPair.first != 0)
+         throw runtime_error("invalid address");
+
+      BinaryWriter bw(2 + resultPair.second.size());
+      bw.put_uint8_t(0);
+      bw.put_uint8_t(resultPair.second.size());
+
+      BinaryDataRef bdr; 
+      bdr.setRef(&resultPair.second[0], resultPair.second.size());
+      bw.put_BinaryDataRef(bdr);
+
+      return bw.getData();
+   }
+
+   /////////////////////////////////////////////////////////////////////////////
+   static string scriptToBech32(const BinaryData& data, const string& prefix)
+   {
+      auto& dataV = data.getVector();
+      auto&& result = segwit_addr::encode(prefix, 0, dataV);
+      if (result.size() == 0)
+         throw runtime_error("invalid script");
+
+      return result;
+   }
 };
    
 static inline void suppressUnusedFunctionWarning()

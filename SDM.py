@@ -93,7 +93,6 @@ def parseLinkList(theData):
 
 
 ################################################################################
-# jgarzik'sjj jsonrpc-bitcoin code -- stupid-easy to talk to bitcoind
 class SatoshiDaemonManager(object):
    """
    Use an existing implementation of bitcoind
@@ -131,11 +130,14 @@ class SatoshiDaemonManager(object):
       if 'testnet' in newDir or 'regtest' in newDir:
          self.satoshiRoot, tail = os.path.split(newDir)
 
-      path = os.path.dirname(os.path.abspath(__file__))
+      execDir = os.path.dirname(inspect.getsourcefile(SatoshiDaemonManager))
+      if execDir.endswith('.zip'):
+         execDir = os.path.dirname(execDir)
+
       if OS_MACOSX:
          # OSX separates binaries/start scripts from the Python code. Back up!
-         path = os.path.join(path, '../../bin/')
-      self.dbExecutable = os.path.join(path, 'ArmoryDB')  
+         execDir = os.path.join(execDir, '../../bin/')
+      self.dbExecutable = os.path.join(execDir, 'ArmoryDB')  
          
       if OS_WINDOWS:
          self.dbExecutable += ".exe"
@@ -225,6 +227,7 @@ class SatoshiDaemonManager(object):
 
          searchPaths.extend([os.path.join(sp, 'Bitcoin') for sp in searchPaths])
          searchPaths.extend([os.path.join(sp, 'daemon') for sp in searchPaths])
+         searchPaths.extend([os.path.join(sp, 'bin') for sp in searchPaths])
 
          possBaseDir = []
 
@@ -364,16 +367,12 @@ class SatoshiDaemonManager(object):
          pargs.append('--regtest');
 
       haveSatoshiDir = False
-      blocksdir = self.satoshiHome
-      if os.path.exists(blocksdir):
-         haveSatoshiDir = True
-      else:
-         blocksdir = os.path.join(self.satoshiHome, 'blocks')
-         if os.path.exists(blocksdir):
-            haveSatoshiDir = True
-      
-      if haveSatoshiDir:      
+      blocksdir = os.path.join(self.satoshiHome, 'blocks')
+      if os.path.exists(blocksdir):   
          pargs.append('--satoshi-datadir="' + blocksdir + '"')
+
+      if (CLI_OPTIONS.satoshiPort):
+         pargs.append('--satoshi-port=' + str(BITCOIN_PORT))
          
       pargs.append('--datadir="' + dataDir + '"')
       pargs.append('--dbdir="' + dbDir + '"')
@@ -389,9 +388,9 @@ class SatoshiDaemonManager(object):
          pargs.append('--clear_mempool')
 
       if ARMORY_RAM_USAGE != -1:
-         pargs.append('--ram-usage=' + ARMORY_RAM_USAGE)
+         pargs.append('--ram-usage=' + str(ARMORY_RAM_USAGE))
       if ARMORY_THREAD_COUNT != -1:
-         pargs.append('--thread-count=' + ARMORY_THREAD_COUNT)
+         pargs.append('--thread-count=' + str(ARMORY_THREAD_COUNT))
 
       kargs = {}
       if OS_WINDOWS:
@@ -400,7 +399,7 @@ class SatoshiDaemonManager(object):
          kargs['creationflags'] = win32process.CREATE_NO_WINDOW
 
       argStr = " ".join(astr for astr in pargs)
-      LOGWARN('Spawning DB with command:' + argStr)
+      LOGWARN('Spawning DB with command: ' + argStr)
 
       launchProcess(pargs, **kargs)
 
@@ -414,7 +413,7 @@ class SatoshiDaemonManager(object):
       elif USE_REGTEST:
          pargs.append('-regtest')
 
-      pargs.append('-datadir=%s' % self.satoshiRoot)
+      pargs.append('-datadir=%s' % self.satoshiHome)
 
       try:
          # Don't want some strange error in this size-check to abort loading
@@ -442,6 +441,8 @@ class SatoshiDaemonManager(object):
          kargs['creationflags'] = win32process.CREATE_NO_WINDOW
 
       # Startup bitcoind and get its process ID (along with our own)
+      argStr = " ".join(astr for astr in pargs)
+      LOGWARN('Spawning bitcoind with command: ' + argStr)      
       self.bitcoind = launchProcess(pargs, **kargs)
 
       self.btcdpid  = self.bitcoind.pid

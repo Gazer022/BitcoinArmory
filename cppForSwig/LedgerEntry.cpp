@@ -50,26 +50,13 @@ void LedgerEntry::setWalletID(BinaryData const & bd)
 
 ////////////////////////////////////////////////////////////////////////////////
 bool LedgerEntry::operator<(LedgerEntry const & le2) const
-{
-   // TODO: I wanted to update this with txTime_, but I didn't want to c
-   //       complicate the mess of changes going in, yet.  Do this later
-   //       once everything is stable again.
-   //if(       blockNum_ != le2.blockNum_)
-      //return blockNum_  < le2.blockNum_;
-   //else if(  index_    != le2.index_)
-      //return index_     < le2.index_;
-   //else if(  txTime_   != le2.txTime_)
-      //return txTime_    < le2.txTime_;
-   //else
-      //return false;
-   
+{  
    if( blockNum_ != le2.blockNum_)
       return blockNum_ < le2.blockNum_;
    else if( index_ != le2.index_)
       return index_ < le2.index_;
    else
       return false;
-   
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -219,7 +206,7 @@ void LedgerEntry::computeLedgerMap(map<BinaryData, LedgerEntry> &leMap,
       {
          blockNum = DBUtils::hgtxToHeight(txioVec.first.getSliceRef(0, 4));
          txIndex = READ_UINT16_BE(txioVec.first.getSliceRef(4, 2));
-         txTime = bc->getHeaderByHeight(blockNum).getTimestamp();
+         txTime = bc->getHeaderByHeight(blockNum)->getTimestamp();
 
          txHash = db->getTxHashForLdbKey(txioVec.first);
       }
@@ -309,6 +296,50 @@ void LedgerEntry::computeLedgerMap(map<BinaryData, LedgerEntry> &leMap,
          isRBF,
          usesWitness,
          isChained);
+
+      /*
+      When signing a tx online, the wallet knows the txhash, therefor it can register all
+      comments on outgoing addresses under the txhash.
+
+      When the tx is signed offline, there is no guarantee that the txhash will be known
+      when the offline tx is crafted. Therefor the comments for each outgoing address are
+      registered under that address only. 
+
+      In order for the GUI to be able to resolve outgoing address comments, the ledger entry
+      needs to carry those for pay out transactions
+      */
+
+      if (value < 0)
+      {
+         try
+         {
+            //grab tx by hash
+            auto&& payout_tx = db->getFullTxCopy(txioVec.first);
+         
+            //get scrAddr for each txout
+            for (unsigned i=0; i < payout_tx.getNumTxOut(); i++)
+            {
+               auto&& txout = payout_tx.getTxOutCopy(i);
+               scrAddrSet.insert(txout.getScrAddressStr());
+            }
+         }
+         catch (exception&)
+         {
+            LMDBEnv::Transaction zctx;
+            db->beginDBTransaction(&zctx, ZERO_CONF, LMDB::ReadOnly);
+
+            StoredTx stx;
+            if (!db->getStoredZcTx(stx, txioVec.first))
+            {
+               LOGWARN << "failed to get tx for ledger parsing";
+            }
+            else
+            {
+               for (auto& txout : stx.stxoMap_)
+                  scrAddrSet.insert(txout.second.getScrAddress());
+            }
+         }
+      }
 
       le.scrAddrSet_ = move(scrAddrSet);
       leMap[txioVec.first] = le;

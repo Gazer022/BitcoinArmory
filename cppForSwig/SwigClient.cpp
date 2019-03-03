@@ -84,10 +84,19 @@ void BlockDataViewer::goOnline()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+BlockDataViewer::BlockDataViewer(void)
+{
+   txMap_ = make_shared<map<BinaryData, Tx>>();
+   rawHeaderMap_ = make_shared<map<BinaryData, BinaryData>>();
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
 BlockDataViewer::BlockDataViewer(const shared_ptr<BinarySocket> sock) :
    sock_(sock)
 {
    txMap_ = make_shared<map<BinaryData, Tx>>();
+   rawHeaderMap_ = make_shared<map<BinaryData, BinaryData>>();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -223,7 +232,8 @@ Blockchain BlockDataViewer::blockchain(void)
 void BlockDataViewer::broadcastZC(const BinaryData& rawTx)
 {
    auto&& txHash = BtcUtils::getHash256(rawTx.getRef());
-   Tx tx(rawTx);
+   Tx tx;
+   tx.unserialize(rawTx);
    txMap_->insert(make_pair(txHash, tx));
 
    Command cmd;
@@ -270,8 +280,45 @@ Tx BlockDataViewer::getTxByHash(const BinaryData& txHash)
 
    Tx tx;
    tx.unserializeWithMetaData(rawtx.get());
-   txMap_->insert(make_pair(txHash, tx));
+   if(tx.isInitialized())
+      txMap_->insert(make_pair(txHash, tx));
    return tx;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+BinaryData BlockDataViewer::getRawHeaderForTxHash(const BinaryData& txHash)
+{
+   BinaryDataRef bdRef(txHash);
+   BinaryData hash;
+
+   if (txHash.getSize() != 32)
+   {
+      if (txHash.getSize() == 64)
+      {
+         string hashstr(txHash.toCharPtr(), txHash.getSize());
+         hash = READHEX(hashstr);
+         bdRef.setRef(hash);
+      }
+   }
+
+   auto iter = rawHeaderMap_->find(bdRef);
+   if (iter != rawHeaderMap_->end())
+      return iter->second;
+
+   Command cmd;
+
+   cmd.method_ = "getRawHeaderForTxHash";
+   cmd.ids_.push_back(bdvID_);
+   cmd.args_.push_back(BinaryDataObject(bdRef));
+   cmd.serialize();
+
+   auto&& result = sock_->writeAndRead(cmd.command_);
+
+   Arguments retval(result);
+   auto&& rawheader = retval.get<BinaryDataObject>();
+
+   rawHeaderMap_->insert(make_pair(bdRef, rawheader.get()));
+   return rawheader.get();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -338,7 +385,8 @@ NodeStatusStruct BlockDataViewer::getNodeStatus()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-float BlockDataViewer::estimateFee(unsigned blocksToConfirm)
+FeeEstimateStruct BlockDataViewer::estimateFee(
+   unsigned blocksToConfirm, const string& strategy)
 {
    Command cmd;
 
@@ -346,17 +394,31 @@ float BlockDataViewer::estimateFee(unsigned blocksToConfirm)
    cmd.ids_.push_back(bdvID_);
 
    IntType inttype(blocksToConfirm);
+   BinaryDataObject bdo(strategy);
 
    cmd.args_.push_back(move(inttype));
+   cmd.args_.push_back(move(bdo));
    cmd.serialize();
 
    auto&& result = sock_->writeAndRead(cmd.command_);
    Arguments args(result);
-   auto serData = args.get<BinaryDataObject>();
 
+   //fee/byte
+   auto serData = args.get<BinaryDataObject>();
    BinaryRefReader brr(serData.get().getRef());
-   
-   return float(brr.get_double());
+   auto val = brr.get_double();
+
+   //issmart
+   auto boolObj = args.get<IntType>();
+   auto boolVal = bool(boolObj.getVal());
+
+   //error msg
+   string error;
+   auto errorData = args.get<BinaryDataObject>().get();
+   if (errorData.getSize() > 0)
+      error = move(string(errorData.getCharPtr(), errorData.getSize()));
+
+   return FeeEstimateStruct(val, boolVal, error);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1131,7 +1193,7 @@ bool ProcessMutex::acquire()
 
    auto holdldb = [this]()
    {
-      this->hold();
+      this->hodl();
    };
 
    holdThr_ = thread(holdldb);
@@ -1168,7 +1230,7 @@ bool ProcessMutex::test(const string& uriLink)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void ProcessMutex::hold()
+void ProcessMutex::hodl()
 {
    auto server = make_unique<ListenServer>(addr_, port_);
    

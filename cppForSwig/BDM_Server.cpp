@@ -692,9 +692,9 @@ void BDV_Server_Object::buildMethodMap()
          throw runtime_error("unexpected id count");
 
       auto height = args.get<IntType>().getVal();
-      auto& header = blockchain().getHeaderByHeight(height);
+      auto header = blockchain().getHeaderByHeight(height);
 
-      BinaryDataObject bdo(header.serialize());
+      BinaryDataObject bdo(header->serialize());
 
       Arguments retarg;
       retarg.push_back(move(bdo));
@@ -767,15 +767,22 @@ void BDV_Server_Object::buildMethodMap()
       (const vector<string>& ids, Arguments& args)->Arguments
    {
       auto blocksToConfirm = args.get<IntType>().getVal();
-      auto feeByte = 
-         this->bdmPtr_->nodeRPC_->getFeeByte(blocksToConfirm);
+      auto strat_bd = args.get<BinaryDataObject>().get();
+      string strat(strat_bd.toCharPtr(), strat_bd.getSize());
+
+      auto feeByte = this->bdmPtr_->nodeRPC_->getFeeByteSmart(
+         blocksToConfirm, strat);
 
       BinaryWriter bw;
-      bw.put_double(feeByte);
-      BinaryDataObject bdo(bw.getData());
+      bw.put_double(feeByte.feeByte_);
+      BinaryDataObject val(bw.getData());
+      IntType version(feeByte.smartFee_);
+      BinaryDataObject err(feeByte.error_);
 
       Arguments retarg;
-      retarg.push_back(move(bdo));
+      retarg.push_back(move(val));
+      retarg.push_back(move(version));
+      retarg.push_back(move(err));
       return move(retarg);
    };
 
@@ -894,6 +901,40 @@ void BDV_Server_Object::buildMethodMap()
    };
 
    methodMap_["getUTXOsForAddrList"] = getUTXOsForAddrList;
+
+   //getRawHeaderForTxHash
+   auto getRawHeaderForTxHash = [this]
+      (const vector<string>& ids, Arguments& args)->Arguments
+   {
+      auto&& hash = args.get<BinaryDataObject>();
+      auto&& dbKey = this->db_->getDBKeyForHash(hash.get());
+      
+      Arguments retarg;
+      if (dbKey.getSize() == 0)
+         return retarg;
+
+      unsigned height; uint8_t dup;
+      BinaryRefReader key_brr(dbKey.getRef());
+      DBUtils::readBlkDataKeyNoPrefix(key_brr, height, dup);
+
+      BinaryData rawHeader;
+      try
+      {
+         auto block = this->blockchain().getHeaderByHeight(height);
+         rawHeader = block->serialize();
+      }
+      catch (exception&)
+      {
+         return retarg;
+      }
+
+      BinaryDataObject headerBDO(move(rawHeader));
+      retarg.push_back(move(headerBDO));
+      return retarg;
+   };
+
+   methodMap_["getRawHeaderForTxHash"] = getRawHeaderForTxHash;
+
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -902,7 +943,10 @@ const shared_ptr<BDV_Server_Object>& Clients::get(const string& id) const
    auto bdvmap = BDVs_.get();
    auto iter = bdvmap->find(id);
    if (iter == bdvmap->end())
+   {
+      LOGERR << "unknown BDVid";
       throw runtime_error("unknown BDVid");
+   }
 
    return iter->second;
 }
@@ -987,7 +1031,10 @@ Arguments Clients::runCommand(const string& cmdStr)
    auto bdv = get(cmdObj.ids_[0]);
 
    //execute command
-   return bdv->executeCommand(cmdObj.method_, cmdObj.ids_, cmdObj.args_);
+   auto&& result = bdv->executeCommand(cmdObj.method_, cmdObj.ids_, cmdObj.args_);
+   bdv->resetCounter();
+
+   return result;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1207,10 +1254,10 @@ void FCGI_Server::init()
 {
    stringstream ss;
 #ifdef _WIN32
-   if(ip_ == "127.0.0.1" || ip_ == "localhost")
+   if (ip_ == "127.0.0.1" || ip_ == "localhost")
       ss << "localhost:" << port_;
    else
-      throw runtime_error("will not bind on anything but localhost");
+      ss << ip_ << ":" << port_;
 #else
    ss << ip_ << ":" << port_;
 #endif
@@ -1363,6 +1410,7 @@ void FCGI_Server::processRequest(FCGX_Request* req)
    }
    else
    {
+      LOGERR << "empty content_length";
       FCGX_Finish_r(req);
       delete req;
 
@@ -1425,7 +1473,7 @@ BDV_Server_Object::BDV_Server_Object(
    {
       if (lbdFut.wait_for(chrono::seconds(0)) == future_status::ready)
       {
-         return bc->top().getBlockHeight();
+         return bc->top()->getBlockHeight();
       }
 
       return UINT32_MAX;
@@ -1532,7 +1580,7 @@ void BDV_Server_Object::init()
    Arguments args;
    BinaryDataObject bdo("BDM_Ready");
    args.push_back(move(bdo));
-   unsigned int topblock = blockchain().top().getBlockHeight();
+   unsigned int topblock = blockchain().top()->getBlockHeight();
    args.push_back(move(IntType(topblock)));
    cb_->callback(move(args));
 
@@ -1572,7 +1620,7 @@ void BDV_Server_Object::maintenanceThread(void)
             auto&& payload =
                dynamic_pointer_cast<BDV_Notification_NewBlock>(notifPtr);
             uint32_t blocknum =
-               payload->reorgState_.newTop->getBlockHeight();
+               payload->reorgState_.newTop_->getBlockHeight();
 
             BinaryDataObject bdo("NewBlock");
             args2.push_back(move(bdo));

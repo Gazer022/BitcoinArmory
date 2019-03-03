@@ -12,7 +12,6 @@ import threading
 import traceback
 
 from armoryengine.ArmoryUtils import *
-from SDM import SatoshiDaemonManager
 from armoryengine.Timer import TimeThisFunction
 import CppBlockUtils as Cpp
 from armoryengine.BinaryPacker import UINT64
@@ -80,10 +79,6 @@ class PySide_CallBack(Cpp.PythonCallback):
             act = BDV_ERROR
             argBdvError = Cpp.BDV_Error_Struct_cast_to_BDVErrorStruct(arg)
             arglist.append(argBdvError)
-         elif action == Cpp.BDMAction_StartedWalletScan:
-            act = SCAN_ACTION
-            argstr = Cpp.BtcUtils_cast_to_string_vec(arg)
-            arglist.append(argstr)
          elif action == Cpp.BDMAction_NodeStatus:
             act = NODESTATUS_UPDATE
             argNodeStatus = Cpp.NodeStatusStruct_cast_to_NodeStatusStruct(arg)
@@ -175,6 +170,8 @@ class BlockDataManager(object):
                
       self.exception = ""
       self.cookie = None
+      
+      self.witness = False
    
    #############################################################################  
    def instantiateBDV(self, port):
@@ -182,7 +179,7 @@ class BlockDataManager(object):
          return
       
       socketType = Cpp.SocketFcgi
-      if self.remoteDB:
+      if self.remoteDB and not FORCE_FCGI:
          socketType = Cpp.SocketHttp 
 
       self.bdv_ = Cpp.BlockDataViewer_getNewBDV(\
@@ -232,11 +229,6 @@ class BlockDataManager(object):
    
    #############################################################################
    @ActLikeASingletonBDM
-   def getTopBlockDifficulty(self):
-      return self.bdv().getTopBlockHeader().getDifficulty()
-   
-   #############################################################################
-   @ActLikeASingletonBDM
    def registerCppNotification(self, cppNotificationListener):
       self.cppNotificationListenerList.append(cppNotificationListener)
     
@@ -248,7 +240,7 @@ class BlockDataManager(object):
    
    #############################################################################
    @ActLikeASingletonBDM
-   def goOnline(self, satoshiDir=None, armoryDBDir=None, armoryHomeDir=None):
+   def goOnline(self):
       self.bdv().goOnline()
       self.callback = PySide_CallBack(self).__disown__()
       self.callback.startLoop()
@@ -277,14 +269,6 @@ class BlockDataManager(object):
          return
 
       self.btcdir = newBtcDir
-
-   #############################################################################
-   @ActLikeASingletonBDM
-   def setArmoryDBDir(self, armoryDBDir):
-      if not os.path.exists(armoryDBDir):
-         os.makedirs(armoryDBDir)
-
-      self.armoryDBDir = armoryDBDir
          
    #############################################################################
    @ActLikeASingletonBDM
@@ -340,20 +324,24 @@ class BlockDataManager(object):
          if bdmSignal == signal:
             func(args)
       self.registerCppNotification(bdmCallback)
+   
+   #############################################################################
+   def setWitness(self, wit):
+      self.witness = wit   
+   
+   #############################################################################
+   def isSegWitEnabled(self):
+      return self.witness or FORCE_SEGWIT
       
    
 ################################################################################
 # Make TheBDM reference the asyncrhonous BlockDataManager wrapper if we are 
 # running 
 TheBDM = None
-TheSDM = None
 if CLI_OPTIONS.offline:
    LOGINFO('Armory loaded in offline-mode.  Will not attempt to load ')
    LOGINFO('blockchain without explicit command to do so.')
    TheBDM = BlockDataManager(isOffline=True)
-
-   # Also create the might-be-needed SatoshiDaemonManager
-   TheSDM = SatoshiDaemonManager()
 
 else:
    # NOTE:  "TheBDM" is sometimes used in the C++ code to reference the
@@ -375,12 +363,6 @@ else:
       cpplf = cppLogFile.encode('utf8')
    Cpp.StartCppLogging(cpplf, 4)
    Cpp.EnableCppLogStdOut()    
-
-   #LOGINFO('LevelDB max-open-files is %d', TheBDM.getMaxOpenFiles())
-
-   # Also load the might-be-needed SatoshiDaemonManager
-   TheSDM = SatoshiDaemonManager()
-
 
 # Put the import at the end to avoid circular reference problem
 from armoryengine.MultiSigUtils import MultiSigLockbox

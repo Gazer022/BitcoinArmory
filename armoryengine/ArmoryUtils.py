@@ -46,8 +46,7 @@ import subprocess
 #from psutil import Popen
 import psutil
 
-from CppBlockUtils import KdfRomix, CryptoAES, ConfigFile_fleshOutArgs
-from qrcodenative import QRCode, QRErrorCorrectLevel
+from CppBlockUtils import KdfRomix, CryptoAES, ConfigFile_fleshOutArgs, AddressType_P2SH_P2WPKH
 
 try:
    if os.path.exists('update_version.py') and os.path.exists('.git'):
@@ -69,7 +68,7 @@ LEVELDB_BLKDATA = 'leveldb_blkdata'
 LEVELDB_HEADERS = 'leveldb_headers'
 
 # Version Numbers
-BTCARMORY_VERSION    = (0, 96,  1, 0)  # (Major, Minor, Bugfix, AutoIncrement)
+BTCARMORY_VERSION    = (0, 96,  5, 0)  # (Major, Minor, Bugfix, AutoIncrement)
 PYBTCWALLET_VERSION  = (1, 35,  0, 0)  # (Major, Minor, Bugfix, AutoIncrement)
 
 # ARMORY_DONATION_ADDR = '1ArmoryXcfq7TnCSuZa9fQjRYwJ4bkRKfv'
@@ -116,19 +115,23 @@ parser.add_option("--rebuild",         dest="rebuild",     default=False,     ac
 parser.add_option("--rescan",          dest="rescan",      default=False,     action="store_true", help="Rescan existing blockchain DB")
 parser.add_option("--rescanBalance",   dest="rescanBalance", default=False,     action="store_true", help="Rescan balance")
 parser.add_option("--nospendzeroconfchange",dest="ignoreAllZC",default=False, action="store_true", help="All zero-conf funds will be unspendable, including sent-to-self coins")
+parser.add_option("--ignore-new-zeroconf",dest="ignoreZC",default=False, action="store_true", help="Do not update wallet balances on zero-conf transactions")
 parser.add_option("--multisigfile",  dest="multisigFile",  default=DEFAULT, type='str',          help="File to store information about multi-signature transactions")
 parser.add_option("--force-wallet-check", dest="forceWalletCheck", default=False, action="store_true", help="Force the wallet sanity check on startup")
+parser.add_option("--disable-wallet-check", dest="disableWalletCheck", default=False, action="store_true", help="Disable the wallet sanity check on startup")
 parser.add_option("--disable-modules", dest="disableModules", default=False, action="store_true", help="Disable looking for modules in the execution directory")
 parser.add_option("--disable-conf-permis", dest="disableConfPermis", default=False, action="store_true", help="Disable forcing permissions on bitcoin.conf")
 parser.add_option("--disable-detsign", dest="enableDetSign", action="store_false", help="Disable Transaction Deterministic Signing (RFC 6979)")
 parser.add_option("--enable-detsign", dest="enableDetSign", action="store_true", help="Enable Transaction Deterministic Signing (RFC 6979) - Enabled by default")
 parser.add_option("--armorydb-ip", dest="armorydb_ip", default=ARMORYDB_DEFAULT_IP, type="str", help="Set remote DB IP (default: 127.0.0.1)")
 parser.add_option("--armorydb-port", dest="armorydb_port", default=ARMORYDB_DEFAULT_PORT, type="str", help="Set remote DB port (default: 9001)")
+parser.add_option("--force-fcgi", dest="force_fcgi", default=False, action="store_true", help="Force the use of fcgi sockets when pointing to a custom DB IP")
 parser.add_option("--ram-usage", dest="ram_usage", default=-1, type="int", help="Set maximum ram during scans, as 128MB increments. Defaults to 4")
 parser.add_option("--thread-count", dest="thread_count", default=-1, type="int", help="Set max thread count during builds and scans. Defaults to CPU total thread count")
 parser.add_option("--db-type", dest="db_type", default="DB_FULL", type="str", help="Set db mode, defaults to DB_FULL")
 parser.add_option("--language", dest="language", default="en", type="str", help="""Set the language for the client to display in. Use the ISO 639-1 language code to choose a language. 
                                                                                  Options are da, de, en, es, el, fr, he, hr, id, ru, sv. Default is en. """)
+parser.add_option("--force-enable-segwit", dest="force_segwit", default=False, action="store_true", help="Allow SegWit address generation in offline mode")
 
 parser.set_defaults(enableDetSign=True)
 
@@ -248,9 +251,9 @@ class UstxError(Exception): pass
 class P2SHNotSupportedError(Exception): pass
 class NonBase58CharacterError(Exception): pass
 class isMSWallet(Exception): pass
+class SignerException(Exception): pass
 
 # Witness variables and constants
-WITNESS = False
 NODE_WITNESS = 1 << 3
 WITNESS_MARKER = 0
 WITNESS_FLAG = 1
@@ -292,11 +295,13 @@ if CLI_OPTIONS.interport < 0:
 # all zero-conf UTXOs as unspendable, including sent-to-self (change)
 IGNOREZC  = CLI_OPTIONS.ignoreAllZC
 
-#supernode
-#ENABLE_SUPERNODE = CLI_OPTIONS.enableSupernode
+FORCE_SEGWIT = False
+if CLI_OPTIONS.offline:
+   FORCE_SEGWIT = CLI_OPTIONS.force_segwit
 
 #db address
 ARMORYDB_IP = CLI_OPTIONS.armorydb_ip
+FORCE_FCGI = CLI_OPTIONS.force_fcgi
 
 usesDefaultDbPort = True
 ARMORYDB_PORT = CLI_OPTIONS.armorydb_port
@@ -314,11 +319,20 @@ ENABLE_DETSIGN = CLI_OPTIONS.enableDetSign
 # Figure out the default directories for Satoshi client, and BicoinArmory
 OS_NAME          = ''
 OS_VARIANT       = ''
-USER_HOME_DIR    = ''
+USER_HOME_DIR    = ''   
 BTC_HOME_DIR     = ''
 ARMORY_HOME_DIR  = ''
-ARMORY_DB_DIR      = ''
+ARMORY_DB_DIR    = ''
 SUBDIR = 'testnet3' if USE_TESTNET else '' + 'regtest' if USE_REGTEST else ''
+
+#settingsObject = SettingsFile(CLI_OPTIONS.settingsPath)
+
+
+if not CLI_OPTIONS.satoshiHome==DEFAULT:
+   BTC_HOME_DIR = CLI_OPTIONS.satoshiHome
+   if BTC_HOME_DIR.endswith('blocks'):
+      BTC_HOME_DIR, blocks_suffix = os.path.split(BTC_HOME_DIR)
+
 if OS_WINDOWS:
    OS_NAME         = 'Windows'
    OS_VARIANT      = platform.win32_ver()
@@ -328,7 +342,11 @@ if OS_WINDOWS:
    rt = ctypes.windll.shell32.SHGetFolderPathW(0, 26, 0, 0, ctypes.byref(buffer))
    USER_HOME_DIR = unicode(buffer.value)
 
-   BTC_HOME_DIR    = os.path.join(USER_HOME_DIR, 'Bitcoin', SUBDIR)
+   if BTC_HOME_DIR == '':
+      BTC_HOME_DIR = os.path.join(USER_HOME_DIR, 'Bitcoin')
+   if SUBDIR != '':
+      BTC_HOME_DIR = os.path.join(BTC_HOME_DIR, SUBDIR)
+   
    ARMORY_HOME_DIR = os.path.join(USER_HOME_DIR, 'Armory', SUBDIR)
    BLKFILE_DIR     = os.path.join(BTC_HOME_DIR, 'blocks')
    BLKFILE_1stFILE = os.path.join(BLKFILE_DIR, 'blk00000.dat')
@@ -336,7 +354,12 @@ elif OS_LINUX:
    OS_NAME         = 'Linux'
    OS_VARIANT      = platform.linux_distribution()
    USER_HOME_DIR   = os.getenv('HOME')
-   BTC_HOME_DIR    = os.path.join(USER_HOME_DIR, '.bitcoin', SUBDIR)
+   
+   if BTC_HOME_DIR == '':
+      BTC_HOME_DIR = os.path.join(USER_HOME_DIR, '.bitcoin')
+   if SUBDIR != '':
+      BTC_HOME_DIR = os.path.join(BTC_HOME_DIR, SUBDIR)
+   
    ARMORY_HOME_DIR = os.path.join(USER_HOME_DIR, '.armory', SUBDIR)
    BLKFILE_DIR     = os.path.join(BTC_HOME_DIR, 'blocks')
    BLKFILE_1stFILE = os.path.join(BLKFILE_DIR, 'blk00000.dat')
@@ -345,7 +368,12 @@ elif OS_MACOSX:
    OS_NAME         = 'MacOSX'
    OS_VARIANT      = platform.mac_ver()
    USER_HOME_DIR   = os.path.expanduser('~/Library/Application Support')
-   BTC_HOME_DIR    = os.path.join(USER_HOME_DIR, 'Bitcoin', SUBDIR)
+    
+   if BTC_HOME_DIR == '':
+      BTC_HOME_DIR = os.path.join(USER_HOME_DIR, 'Bitcoin')
+   if SUBDIR != '':
+      BTC_HOME_DIR = os.path.join(BTC_HOME_DIR, SUBDIR)   
+   
    ARMORY_HOME_DIR = os.path.join(USER_HOME_DIR, 'Armory', SUBDIR)
    BLKFILE_DIR     = os.path.join(BTC_HOME_DIR, 'blocks')
    BLKFILE_1stFILE = os.path.join(BLKFILE_DIR, 'blk00000.dat')
@@ -369,7 +397,8 @@ NETWORKS['\x34'] = "Namecoin Network"
 
 # We disable wallet checks on ARM for the sake of resources (unless forced)
 DO_WALLET_CHECK = CLI_OPTIONS.forceWalletCheck or \
-                  not platform.machine().lower().startswith('arm')
+                  not platform.machine().lower().startswith('arm') and \
+                  not CLI_OPTIONS.disableWalletCheck
 
 # Version Handling Code
 def getVersionString(vquad, numPieces=4):
@@ -404,24 +433,6 @@ def readVersionInt(verInt):
    verList.append( int(verStr[:-7       ]) )
    return tuple(verList[::-1])
 
-# Allow user to override default bitcoin-core/bitcoind home directory
-if not CLI_OPTIONS.satoshiHome==DEFAULT:
-   success = True
-   if USE_TESTNET:
-      testnetTry = os.path.join(CLI_OPTIONS.satoshiHome, 'testnet3')
-      if os.path.exists(testnetTry):
-         CLI_OPTIONS.satoshiHome = testnetTry
-   if USE_REGTEST:
-      regtestTry = os.path.join(CLI_OPTIONS.satoshiHome, 'regtest')
-      if os.path.exists(regtestTry):
-         CLI_OPTIONS.satoshiHome = regtestTry
-
-   if not os.path.exists(CLI_OPTIONS.satoshiHome):
-      print 'Directory "%s" does not exist!  Using default!' % \
-                                                CLI_OPTIONS.satoshiHome
-   else:
-      BTC_HOME_DIR = CLI_OPTIONS.satoshiHome
-
 # Allow user to override default Armory home directory
 if not CLI_OPTIONS.datadir==DEFAULT:
    try:
@@ -435,8 +446,8 @@ if not CLI_OPTIONS.datadir==DEFAULT:
       # constructor completes so that a warning dialog
       # can be displayed
       pass
-# Same for the directory that holds the LevelDB databases
-ARMORY_DB_DIR     = os.path.join(ARMORY_HOME_DIR, 'databases')
+# Same for the directory that holds the LMDB databases
+ARMORY_DB_DIR = os.path.join(ARMORY_HOME_DIR, 'databases')
 
 if not CLI_OPTIONS.armoryDBDir==DEFAULT:
    try:
@@ -450,6 +461,7 @@ if not CLI_OPTIONS.armoryDBDir==DEFAULT:
       # constructor completes so that a warning dialog
       # can be displayed
       pass
+
 
 
 # Change the log file to use
@@ -500,6 +512,8 @@ if not os.path.exists(ARMORY_DB_DIR):
 from CppBlockUtils import BlockDataManagerConfig
 bdmConfig = BlockDataManagerConfig()
 
+BECH32_PREFIX = "tb" #default to testnet
+
 if not USE_TESTNET and not USE_REGTEST:
    # TODO:  The testnet genesis tx hash can't be the same...?
    BITCOIN_PORT = 8333
@@ -513,17 +527,18 @@ if not USE_TESTNET and not USE_REGTEST:
    ADDRBYTE = '\x00'
    P2SHBYTE = '\x05'
    PRIVKEYBYTE = '\x80'
+   BECH32_PREFIX = "bc"
 
    # This will usually just be used in the GUI to make links for the user
-   BLOCKEXPLORE_NAME     = 'blockchain.info'
-   BLOCKEXPLORE_URL_TX   = 'https://blockchain.info/tx/%s'
-   BLOCKEXPLORE_URL_ADDR = 'https://blockchain.info/address/%s'
+   BLOCKEXPLORE_NAME     = 'blockstream.info'
+   BLOCKEXPLORE_URL_TX   = 'https://blockstream.info/tx/%s'
+   BLOCKEXPLORE_URL_ADDR = 'https://blockstream.info/address/%s'
 else:
    #set static members of BDMconfig for address generation on C++ side
    bdmConfig.selectNetwork("Test")
    
    BITCOIN_PORT = 18444 if USE_REGTEST else 18333
-   BITCOIN_RPC_PORT = 18332
+   BITCOIN_RPC_PORT = 18443 if USE_REGTEST else 18332
    ARMORY_RPC_PORT     = 18225
    if USE_TESTNET:
       MAGIC_BYTES  = '\x0b\x11\x09\x07'
@@ -561,8 +576,11 @@ SCRADDR_P2PKH_BYTE    = '\x00'
 SCRADDR_P2SH_BYTE     = '\x05'
 SCRADDR_MULTISIG_BYTE = '\xfe'
 SCRADDR_NONSTD_BYTE   = '\xff'
+SCRADDR_P2WPKH_BYTE   = '\x90'
+SCRADDR_P2WSH_BYTE    = '\x95'
 SCRADDR_BYTE_LIST     = [ADDRBYTE, \
                          P2SHBYTE, \
+                         SCRADDR_P2WPKH_BYTE, SCRADDR_P2WSH_BYTE, \
                          SCRADDR_MULTISIG_BYTE, \
                          SCRADDR_NONSTD_BYTE]
 
@@ -575,6 +593,8 @@ CPP_TXOUT_P2SH         = 4
 CPP_TXOUT_NONSTANDARD  = 5
 CPP_TXOUT_P2WPKH       = 6
 CPP_TXOUT_P2WSH        = 7
+CPP_TXOUT_OPRETURN     = 8
+
 CPP_TXOUT_HAS_ADDRSTR  = [CPP_TXOUT_STDHASH160, \
                           CPP_TXOUT_STDPUBKEY65,
                           CPP_TXOUT_STDPUBKEY33,
@@ -586,16 +606,18 @@ CPP_TXOUT_STDSINGLESIG = [CPP_TXOUT_STDHASH160, \
                           CPP_TXOUT_STDPUBKEY33]
 CPP_TXOUT_NESTED_SINGLESIG = [CPP_TXOUT_STDPUBKEY33,
                           CPP_TXOUT_P2WPKH]
+CPP_TXOUT_SEGWIT = [AddressType_P2SH_P2WPKH]
 
-CPP_TXOUT_SCRIPT_NAMES = ['']*8
+CPP_TXOUT_SCRIPT_NAMES = ['']*9
 CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_STDHASH160]  = 'Standard (PKH)'
 CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_STDPUBKEY65] = 'Standard (PK65)'
 CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_STDPUBKEY33] = 'Standard (PK33)'
 CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_MULTISIG]    = 'Multi-Signature'
 CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_P2SH]        = 'Standard (P2SH)'
 CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_NONSTANDARD] = 'Non-Standard'
-CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_P2WPKH]      = 'Standard (P2WPKH)'
-CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_P2WSH]       = 'Standard (P2WSH)'
+CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_P2WPKH]      = 'SegWit (P2WPKH)'
+CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_P2WSH]       = 'SegWit (P2WSH)'
+CPP_TXOUT_SCRIPT_NAMES[CPP_TXOUT_OPRETURN]    = 'Meta Data (OP_RETURN)'
 
 # Copied from cppForSwig/BtcUtils.h::getTxInScriptTypeInt(script)
 CPP_TXIN_STDUNCOMPR    = 0
@@ -803,7 +825,7 @@ def LOGDEBUG(msg, *a):
    try:
       logstr = msg if len(a)==0 else (msg%a)
       callerStr = getCallerLine() + ' - '
-      logging.debug(callerStr + logstr)
+      logging.debug(callerStr + str(logstr))
    except TypeError:
       traceback.print_stack()
       raise
@@ -812,7 +834,7 @@ def LOGINFO(msg, *a):
    try:
       logstr = msg if len(a)==0 else (msg%a)
       callerStr = getCallerLine() + ' - '
-      logging.info(callerStr + logstr)
+      logging.info(callerStr + str(logstr))
    except TypeError:
       traceback.print_stack()
       raise
@@ -820,7 +842,7 @@ def LOGWARN(msg, *a):
    try:
       logstr = msg if len(a)==0 else (msg%a)
       callerStr = getCallerLine() + ' - '
-      logging.warn(callerStr + logstr)
+      logging.warn(callerStr + str(logstr))
    except TypeError:
       traceback.print_stack()
       raise
@@ -828,7 +850,7 @@ def LOGERROR(msg, *a):
    try:
       logstr = msg if len(a)==0 else (msg%a)
       callerStr = getCallerLine() + ' - '
-      logging.error(callerStr + logstr)
+      logging.error(callerStr + str(logstr))
    except TypeError:
       traceback.print_stack()
       raise
@@ -836,7 +858,7 @@ def LOGCRIT(msg, *a):
    try:
       logstr = msg if len(a)==0 else (msg%a)
       callerStr = getCallerLine() + ' - '
-      logging.critical(callerStr + logstr)
+      logging.critical(callerStr + str(logstr))
    except TypeError:
       traceback.print_stack()
       raise
@@ -844,7 +866,7 @@ def LOGEXCEPT(msg, *a):
    try:
       logstr = msg if len(a)==0 else (msg%a)
       callerStr = getCallerLine() + ' - '
-      logging.exception(callerStr + logstr)
+      logging.exception(callerStr + str(logstr))
    except TypeError:
       traceback.print_stack()
       raise
@@ -968,8 +990,12 @@ if CLI_OPTIONS.logDisable:
 
 
 def logexcept_override(_type, value, tback):
-   strList = traceback.format_exception(_type,value,tback)
-   logging.error(''.join([s for s in strList]))
+   try:
+      strList = traceback.format_exception(_type,value,tback)
+      logging.error(''.join([s for s in strList]))
+   except:
+      pass
+   
    # then call the default handler
    sys.__excepthook__(_type, value, tback)
 
@@ -1643,6 +1669,8 @@ def scrAddr_to_addrStr(scrAddr):
       return hash160_to_addrStr(scrAddr[1:])
    elif prefix==P2SHBYTE:
       return hash160_to_p2shAddrStr(scrAddr[1:])
+   elif prefix==SCRADDR_P2WPKH_BYTE or prefix==SCRADDR_P2WSH_BYTE:
+      return Cpp.BtcUtils_scriptToBech32(scrAddr[1:], BECH32_PREFIX)
    else:
       LOGERROR('Unsupported scrAddr type: "%s"' % binary_to_hex(scrAddr))
       raise BadAddressError('Can only convert P2PKH and P2SH scripts')
@@ -2452,43 +2480,6 @@ def binaryBits_to_difficulty(b):
 def difficulty_to_binaryBits(i):
    pass
 
-################################################################################
-def CreateQRMatrix(dataToEncode, errLevel=QRErrorCorrectLevel.L):
-   dataLen = len(dataToEncode)
-   baseSz = 4 if errLevel == QRErrorCorrectLevel.L else \
-            5 if errLevel == QRErrorCorrectLevel.M else \
-            6 if errLevel == QRErrorCorrectLevel.Q else \
-            7 # errLevel = QRErrorCorrectLevel.H
-   sz = baseSz if dataLen < 70 else  5 +  (dataLen - 70) / 30
-   qrmtrx = [[]]
-   while sz<20:
-      try:
-         errCorrectEnum = getattr(QRErrorCorrectLevel, errLevel.upper())
-         qr = QRCode(sz, errCorrectEnum)
-         qr.addData(dataToEncode)
-         qr.make()
-         success=True
-         break
-      except TypeError:
-         sz += 1
-
-   if not success:
-      LOGERROR('Unsuccessful attempt to create QR code')
-      LOGERROR('Data to encode: (Length: %s, isAscii: %s)', \
-                     len(dataToEncode), isASCII(dataToEncode))
-      return [[0]], 1
-
-   qrmtrx = []
-   modCt = qr.getModuleCount()
-   for r in range(modCt):
-      tempList = [0]*modCt
-      for c in range(modCt):
-         # The matrix is transposed by default, from what we normally expect
-         tempList[c] = 1 if qr.isDark(c,r) else 0
-      qrmtrx.append(tempList)
-
-   return [qrmtrx, modCt]
-
 
 # The following params are for the Bitcoin elliptic curves (secp256k1)
 SECP256K1_MOD   = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2FL
@@ -2621,7 +2612,7 @@ class FiniteField(object):
 
 
 ################################################################################
-def SplitSecret(secret, needed, pieces, nbytes=None, use_random_x=False):
+def SplitSecret(secret, needed, pieces, nbytes=None):
    if not isinstance(secret, basestring):
       secret = secret.toBinStr()
 
@@ -2648,13 +2639,10 @@ def SplitSecret(secret, needed, pieces, nbytes=None, use_random_x=False):
       raise FiniteFieldError
 
 
-   # We deterministically produce the coefficients so that we always use the
-   # same polynomial for a given secret
-   lasthmac = secret[:]
+   # We use randomized coefficients so as to respect SSS security parameters
    othernum = []
    for i in range(pieces+needed-1):
-      lasthmac = HMAC512(lasthmac, 'splitsecrets')[:nbytes]
-      othernum.append(binary_to_int(lasthmac))
+      othernum.append(binary_to_int(SecureBinaryData().GenerateRandom(nbytes).toBinStr()))
 
    def poly(x):
       polyout = ff.mult(a, ff.power(x,needed-1))
@@ -2664,7 +2652,7 @@ def SplitSecret(secret, needed, pieces, nbytes=None, use_random_x=False):
       return polyout
 
    for i in range(pieces):
-      x = othernum[i+2] if use_random_x else i+1
+      x = i+1
       fragments.append( [x, poly(x)] )
 
    secret,a = None,None
@@ -2782,10 +2770,10 @@ def ReadFragIDLineBin(binLine):
    doMask = binary_to_int(binLine[0]) > 127
    M      = binary_to_int(binLine[0]) & 0x7f
    fnum   = binary_to_int(binLine[1])
-   wltID  = binLine[2:]
+   fragID  = binLine[2:]
 
-   idBase58 = ComputeFragIDBase58(M, wltID) + '-#' + str(fnum)
-   return (M, fnum, wltID, doMask, idBase58)
+   idBase58 = ComputeFragIDBase58(M, fragID) + '-#' + str(fnum)
+   return (M, fnum, fragID, doMask, idBase58)
 
 
 ################################################################################

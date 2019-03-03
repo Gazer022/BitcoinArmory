@@ -32,6 +32,8 @@ from armoryengine.PyBtcWalletRecovery import RECOVERMODE
 from armoryengine.ArmoryUtils import BTC_HOME_DIR
 
 from ui.TreeViewGUI import AddressTreeModel
+from ui.QrCodeMatrix import CreateQRMatrix
+from ui.SignerSelectDialog import SignerLabelFrame
 
 NO_CHANGE = 'NoChange'
 MIN_PASSWD_WIDTH = lambda obj: tightSizeStr(obj, '*' * 16)[0]
@@ -4387,7 +4389,8 @@ class DlgConfirmSend(ArmoryDialog):
       returnPairs = []
       for script,val in scriptValPairs:
          scrType = getTxOutScriptType(script)
-         if scrType in CPP_TXOUT_HAS_ADDRSTR:
+         if scrType in CPP_TXOUT_HAS_ADDRSTR and \
+            scrType != CPP_TXOUT_P2WPKH and scrType != CPP_TXOUT_P2WSH:
             scraddr = script_to_scrAddr(script)
             addr160 = scrAddr_to_hash160(scraddr)[1]
             if wlt.hasAddr(addr160):
@@ -4530,7 +4533,26 @@ class DlgConfirmSend(ArmoryDialog):
       buttonBox = QDialogButtonBox()
       buttonBox.addButton(self.btnAccept, QDialogButtonBox.AcceptRole)
       buttonBox.addButton(self.btnCancel, QDialogButtonBox.RejectRole)
-
+      
+      self.signerType = SIGNER_DEFAULT
+      def setSignerType(_type):
+         self.signerType = _type
+      
+      isSigned = False
+      if isinstance(pytxOrUstx, PyTx):
+         ustx = UnsignedTransaction()
+         ustx.createFromPyTx(pytxOrUstx)
+         isSigned = pytxOrUstx.verifySigsAllInputs()
+      else:
+         isSigned = pytxOrUstx.verifySigsAllInputs(pytxOrUstx.signerType)
+         
+      if self.main.usermode == USERMODE.Expert and isSigned == False:
+         self.signerSelect = SignerLabelFrame(self.main, pytxOrUstx, setSignerType)
+         self.signerSelectFrame = self.signerSelect.getFrame()
+      
+         frmBtnSelect = makeHorizFrame([STRETCH, self.signerSelectFrame, buttonBox])
+      else:
+         frmBtnSelect = buttonBox
 
       frmTable = makeLayoutFrame(VERTICAL, recipLbls, STYLE_RAISED)
       frmRight = makeVertFrame([ lblMsg, \
@@ -4540,7 +4562,7 @@ class DlgConfirmSend(ArmoryDialog):
                                   'Space(10)', \
                                   lblLastConfirm, \
                                   'Space(10)', \
-                                  buttonBox ])
+                                  frmBtnSelect ])
 
       frmAll = makeHorizFrame([ lblInfoImg, frmRight ])
 
@@ -4549,6 +4571,10 @@ class DlgConfirmSend(ArmoryDialog):
       self.setLayout(layout)
       self.setMinimumWidth(350)
       self.setWindowTitle(self.tr('Confirm Transaction'))
+   
+   #############################################################################   
+   def getSignerType(self):
+      return self.signerType
 
 
 ################################################################################
@@ -5067,7 +5093,7 @@ class DlgShowKeyList(ArmoryDialog):
       wltID = self.wlt.uniqueIDB58
       fn = self.main.getFileSave(title=self.tr('Save Key List'), \
                                  ffilter=[self.tr('Text Files (*.txt)')], \
-                                 defaultFilename=('keylist_%1_.txt' % wltID))
+                                 defaultFilename=('keylist_%s_.txt' % wltID))
       if len(fn) > 0:
          fileobj = open(fn, 'w')
          fileobj.write(str(self.txtBox.toPlainText()))
@@ -5120,13 +5146,13 @@ def extractTxInfo(pytx, rcvTime=None):
       txcpp = TheBDM.bdv().getTxByHash(txHash)
       if txcpp.isInitialized():
          hgt = txcpp.getBlockHeight()
+         txWeight = txcpp.getTxWeight()
          if hgt <= TheBDM.getTopBlockHeight():
             headref = TheBDM.bdv().blockchain().getHeaderByHeight(hgt)
             txTime = unixTimeToFormatStr(headref.getTimestamp())
             txBlk = headref.getBlockHeight()
             txIdx = txcpp.getBlockTxIndex()
             txSize = txcpp.getSize()
-            txWeight = txcpp.getTxWeight()
          else:
             if rcvTime == None:
                txTime = 'Unknown'
@@ -5233,10 +5259,10 @@ class DlgDispTxInfo(ArmoryDialog):
       ustx = None
       if isinstance(pytx, UnsignedTransaction):
          ustx = pytx
-         pytx = ustx.getPyTxSignedIfPossible()
+         pytx = ustx.getPyTxSignedIfPossible(signer=ustx.signerType)
 
 
-      self.pytx = pytx.copyWithoutWitness()
+      self.pytx = pytx.copy()
 
       if self.mode == None:
          self.mode = self.main.usermode
@@ -5264,8 +5290,12 @@ class DlgDispTxInfo(ArmoryDialog):
             scrType = CPP_TXOUT_P2SH
 
          if scrType in CPP_TXOUT_HAS_ADDRSTR:
-            addrStr = script_to_addrStr(script)
-            addr160 = addrStr_to_hash160(addrStr)[1]
+            try:
+               addrStr = script_to_addrStr(script)
+               addr160 = addrStr_to_hash160(addrStr)[1]
+            except:
+               addr160 = ""
+
             scrAddr = script_to_scrAddr(script)
             if haveWallet and wlt.hasAddr(addr160):
                svPairSelf.append([scrAddr, amt])
@@ -5395,8 +5425,21 @@ class DlgDispTxInfo(ArmoryDialog):
       lbls.append([])
       lbls[-1].append(self.main.createToolTipWidget(self.tr('Comment stored for this transaction in this wallet')))
       lbls[-1].append(QLabel(self.tr('User Comment:')))
-      if haveWallet and wlt.getComment(txHash):
-         lbls[-1].append(QRichLabel(wlt.getComment(txHash)))
+      try:
+         txhash_bin = hex_to_binary(txHash, endOut=endianness)
+      except:
+         txhash_bin = txHash
+      comment_tx = ''
+      if haveWallet:
+         comment_tx = wlt.getComment(txhash_bin)
+         if not comment_tx: # and tempPyTx:
+            comment_tx = wlt.getAddrCommentIfAvail(txhash_bin)
+            #for txout in tempPyTx.outputs:
+             #  script = script_to_scrAddr(txout.getScript())
+
+
+      if comment_tx:
+         lbls[-1].append(QRichLabel(comment_tx))
       else:
          lbls[-1].append(QRichLabel(self.tr('<font color="gray">[None]</font>')))
 
@@ -5592,7 +5635,7 @@ class DlgDispTxInfo(ArmoryDialog):
       self.txInView.verticalHeader().hide()
       w, h = tightSizeNChar(self.txInView, 1)
       self.txInView.setMinimumHeight(2 * (1.4 * h))
-      self.txInView.setMaximumHeight(5 * (1.4 * h))
+      #self.txInView.setMaximumHeight(5 * (1.4 * h))
       self.txInView.hideColumn(TXINCOLS.OutPt)
       self.txInView.hideColumn(TXINCOLS.OutIdx)
       self.txInView.hideColumn(TXINCOLS.Script)
@@ -5626,7 +5669,7 @@ class DlgDispTxInfo(ArmoryDialog):
       self.txOutView.verticalHeader().setDefaultSectionSize(20)
       self.txOutView.verticalHeader().hide()
       self.txOutView.setMinimumHeight(2 * (1.3 * h))
-      self.txOutView.setMaximumHeight(5 * (1.3 * h))
+      #self.txOutView.setMaximumHeight(5 * (1.3 * h))
       initialColResize(self.txOutView, [wWlt, 0.8 * wAddr, wAmt, 0.25, 0])
       self.txOutView.hideColumn(TXOUTCOLS.Script)
       self.txOutView.hideColumn(TXOUTCOLS.AddrStr)
@@ -5744,7 +5787,7 @@ class DlgDispTxInfo(ArmoryDialog):
       # layout.addWidget(bbox, 6,0, 1,1)
 
       self.setLayout(layout)
-      self.layout().setSizeConstraint(QLayout.SetFixedSize)
+      #self.layout().setSizeConstraint(QLayout.SetFixedSize)
       self.setWindowTitle(self.tr('Transaction Info'))
 
 
@@ -6768,7 +6811,9 @@ class DlgPrintBackup(ArmoryDialog):
       elif printType == 'SingleSheetImported':
          bType = self.tr('Imported Keys %1').arg(ssType)
       elif printType.lower().startswith('frag'):
-         bstr = self.tr('Fragmented Backup (%1-of-%2)').arg(self.fragData['M'], self.fragData['N'])
+         m_count = str(self.fragData['M'])
+         n_count = str(self.fragData['N'])
+         bstr = self.tr('Fragmented Backup (%1-of-%2)').arg(m_count, n_count)
          bType = bstr + ' ' + ssType
 
       if printType.startswith('SingleSheet'):
@@ -6919,7 +6964,7 @@ class DlgPrintBackup(ArmoryDialog):
 
          try:
             yBin = fmtrx[printData][1].toBinStr()
-            binID = self.wlt.uniqueIDBin
+            binID = base58_to_binary(self.fragData['fragSetID'])
             IDLine = ComputeFragIDLineHex(M, printData, binID, doMask, addSpaces=True)
             if len(yBin) == 32:
                Prefix.append('ID:');  Lines.append(IDLine)
@@ -8282,6 +8327,8 @@ class DlgSettings(ArmoryDialog):
          'Let Armory run Bitcoin Core/bitcoind in the background'))
       self.edtSatoshiExePath = QLineEdit()
       self.edtSatoshiHomePath = QLineEdit()
+      self.edtArmoryDbdir = QLineEdit()
+
       self.edtSatoshiExePath.setMinimumWidth(tightSizeNChar(GETFONT('Fixed', 10), 40)[0])
       self.connect(self.chkManageSatoshi, SIGNAL(CLICKED), self.clickChkManage)
       self.startChk = self.main.getSettingOrSetDefault('ManageSatoshi', not OS_MACOSX)
@@ -8311,16 +8358,16 @@ class DlgSettings(ArmoryDialog):
       if self.main.settings.hasSetting('SatoshiDatadir'):
          self.edtSatoshiHomePath.setText(self.main.settings.get('SatoshiDatadir'))
          self.edtSatoshiHomePath.home(False)
+      if self.main.settings.hasSetting('ArmoryDbdir'):
+         self.edtArmoryDbdir.setText(self.main.settings.get('ArmoryDbdir'))
+         self.edtArmoryDbdir.home(False)
+
 
       lblDescrExe = QRichLabel(self.tr('Bitcoin Install Dir:'))
-      lblDescrHome = QRichLabel(self.tr('Bitcoin Home Dir:'))
       lblDefaultExe = QRichLabel(self.tr('Leave blank to have Armory search default '
                                   'locations for your OS'), size=2)
-      lblDefaultHome = QRichLabel(self.tr('Leave blank to use default datadir '
-                                  '(%1)').arg(BTC_HOME_DIR), size=2)
 
       self.btnSetExe = createDirectorySelectButton(self, self.edtSatoshiExePath)
-      self.btnSetHome = createDirectorySelectButton(self, self.edtSatoshiHomePath)
 
       layoutMgmt = QGridLayout()
       layoutMgmt.addWidget(lblManageSatoshi, 0, 0, 1, 3)
@@ -8331,17 +8378,45 @@ class DlgSettings(ArmoryDialog):
       layoutMgmt.addWidget(self.btnSetExe, 2, 2)
       layoutMgmt.addWidget(lblDefaultExe, 3, 1, 1, 2)
 
-      layoutMgmt.addWidget(lblDescrHome, 4, 0)
-      layoutMgmt.addWidget(self.edtSatoshiHomePath, 4, 1)
-      layoutMgmt.addWidget(self.btnSetHome, 4, 2)
-      layoutMgmt.addWidget(lblDefaultHome, 5, 1, 1, 2)
       frmMgmt = QFrame()
       frmMgmt.setLayout(layoutMgmt)
 
       self.clickChkManage()
       ##########################################################################
 
+      lblPathing = QRichLabel(self.tr('<b> Blockchain and Database Paths</b>'
+         '<br><br>'
+         'Optional feature to specify custom paths for blockchain '
+         'data and Armory\'s database.'
+         ))
 
+      lblDescrHome = QRichLabel(self.tr('Bitcoin Home Dir:'))
+      lblDefaultHome = QRichLabel(self.tr('Leave blank to use default datadir '
+                                  '(%1)').arg(BTC_HOME_DIR), size=2)
+      lblDescrDbdir = QRichLabel(self.tr('Armory Database Dir:'))
+      lblDefaultDbdir = QRichLabel(self.tr('Leave blank to use default datadir '
+                                  '(%1)').arg(ARMORY_DB_DIR), size=2)
+
+      self.btnSetHome = createDirectorySelectButton(self, self.edtSatoshiHomePath)
+      self.btnSetDbdir = createDirectorySelectButton(self, self.edtArmoryDbdir)
+
+      layoutPath = QGridLayout()
+      layoutPath.addWidget(lblPathing, 0, 0, 1, 3)
+
+      layoutPath.addWidget(lblDescrHome, 1, 0)
+      layoutPath.addWidget(self.edtSatoshiHomePath, 1, 1)
+      layoutPath.addWidget(self.btnSetHome, 1, 2)
+      layoutPath.addWidget(lblDefaultHome, 2, 1, 1, 2)
+
+      layoutPath.addWidget(lblDescrDbdir, 3, 0)
+      layoutPath.addWidget(self.edtArmoryDbdir, 3, 1)
+      layoutPath.addWidget(self.btnSetDbdir, 3, 2)
+      layoutPath.addWidget(lblDefaultDbdir, 4, 1, 1, 2)
+
+      frmPaths = QFrame()
+      frmPaths.setLayout(layoutPath)
+
+      ##########################################################################
       lblDefaultUriTitle = QRichLabel(self.tr('<b>Set Armory as default URL handler</b>'))
       lblDefaultURI = QRichLabel(self.tr(
          'Set Armory to be the default when you click on "bitcoin:" '
@@ -8521,6 +8596,12 @@ class DlgSettings(ArmoryDialog):
 
       i += 1
       frmLayout.addWidget(frmMgmt, i, 0, 1, 3)
+
+      i += 1
+      frmLayout.addWidget(HLINE(), i, 0, 1, 3)
+
+      i += 1
+      frmLayout.addWidget(frmPaths, i, 0, 1, 3)
 
       i += 1
       frmLayout.addWidget(HLINE(), i, 0, 1, 3)
@@ -8844,21 +8925,36 @@ class DlgSettings(ArmoryDialog):
          else:
             self.main.settings.delete('SatoshiExe')
 
-         # Check valid path is supplied for bitcoind home directory
-         pathHome = unicode(self.edtSatoshiHomePath.text()).strip()
-         if len(pathHome) > 0:
-            if not os.path.exists(pathHome):
-               exeName = 'bitcoin-qt.exe' if OS_WINDOWS else 'bitcoin-qt'
-               QMessageBox.warning(self, self.tr('Invalid Path'), self.tr(
+      # Check path is supplied for bitcoind home directory
+      pathHome = unicode(self.edtSatoshiHomePath.text()).strip()
+      if len(pathHome) > 0:
+         if not os.path.exists(pathHome):
+            QMessageBox.warning(self, self.tr('Invalid Path'), self.tr(
                   'The path you specified for the Bitcoin software home directory '
                   'does not exist.  Only specify this directory if you use a '
                   'non-standard "-datadir=" option when running Bitcoin Core or '
                   'bitcoind.  If you leave this field blank, the following '
                   'path will be used: <br><br> %1').arg(BTC_HOME_DIR), QMessageBox.Ok)
-               return
-            self.main.writeSetting('SatoshiDatadir', pathHome)
-         else:
-            self.main.settings.delete('SatoshiDatadir')
+            return
+         self.main.writeSetting('SatoshiDatadir', pathHome)
+      else:
+         self.main.settings.delete('SatoshiDatadir')
+
+      # Check path is supplied for armory db directory
+      pathDbdir = unicode(self.edtArmoryDbdir.text()).strip()
+      if len(pathDbdir) > 0:
+         if not os.path.exists(pathDbdir):
+            QMessageBox.warning(self, self.tr('Invalid Path'), self.tr(
+                  'The path you specified for Armory\'s database directory '
+                  'does not exist.  Only specify this directory if you want '
+                  'Armory to save its local database to a custom path. '
+                  'If you leave this field blank, the following '
+                  'path will be used: <br><br> %1').arg(ARMORY_DB_DIR), QMessageBox.Ok)
+            return
+         self.main.writeSetting('ArmoryDbdir', pathDbdir)
+      else:
+         self.main.settings.delete('ArmoryDbdir')
+
 
       self.main.writeSetting('ManageSatoshi', self.chkManageSatoshi.isChecked())
 
@@ -8949,9 +9045,7 @@ class DlgSettings(ArmoryDialog):
    #############################################################################
    def clickChkManage(self):
       self.edtSatoshiExePath.setEnabled(self.chkManageSatoshi.isChecked())
-      self.edtSatoshiHomePath.setEnabled(self.chkManageSatoshi.isChecked())
       self.btnSetExe.setEnabled(self.chkManageSatoshi.isChecked())
-      self.btnSetHome.setEnabled(self.chkManageSatoshi.isChecked())
 
 
 ################################################################################
@@ -10361,6 +10455,8 @@ class DlgFragBackup(ArmoryDialog):
       frmDescr = makeVertFrame([lblDescrTitle, self.lblAboveFrags], \
                                                             STYLE_RAISED)
 
+      self.fragDisplayLastN = 0
+      self.fragDisplayLastM = 0
 
       self.maxM = 5 if not self.main.usermode == USERMODE.Expert else 8
       self.maxN = 6 if not self.main.usermode == USERMODE.Expert else 12
@@ -10474,11 +10570,16 @@ class DlgFragBackup(ArmoryDialog):
 
    #############################################################################
    def createFragDisplay(self):
-      self.recomputeFragData()
       M = int(str(self.comboM.currentText()))
       N = int(str(self.comboN.currentText()))
 
+      #only recompute fragments if M or N changed
+      if self.fragDisplayLastN != N or \
+         self.fragDisplayLastM != M:
+         self.recomputeFragData()
 
+      self.fragDisplayLastN = N
+      self.fragDisplayLastM = M
 
       lblAboveM = QRichLabel(self.tr('<u><b>Required Fragments</b></u> '), hAlign=Qt.AlignHCenter, doWrap=False)
       lblAboveN = QRichLabel(self.tr('<u><b>Total Fragments</b></u> '), hAlign=Qt.AlignHCenter)
@@ -10527,7 +10628,8 @@ class DlgFragBackup(ArmoryDialog):
       M = int(str(self.comboM.currentText()))
       N = int(str(self.comboN.currentText()))
 
-      lblFragID = QRichLabel(self.tr('<b>Fragment ID:<br>%1-%2</b>').arg(self.fragPrefixStr, idx + 1))
+      lblFragID = QRichLabel(self.tr('<b>Fragment ID:<br>%1-%2</b>').arg(\
+                                    str(self.fragPrefixStr), str(idx + 1)))
       # lblWltID = QRichLabel('(%s)' % self.wlt.uniqueIDB58)
       lblFragPix = QImageLabel(self.fragPixmapFn, size=(72, 72))
       if doMask:
@@ -10538,7 +10640,7 @@ class DlgFragBackup(ArmoryDialog):
       easyYs1 = makeSixteenBytesEasy(ys[:16   ])
       easyYs2 = makeSixteenBytesEasy(ys[ 16:32])
 
-      binID = self.wlt.uniqueIDBin
+      binID = base58_to_binary(self.uniqueFragSetID)
       ID = ComputeFragIDLineHex(M, idx, binID, doMask, addSpaces=True)
 
       fragPreview = 'ID: %s...<br>' % ID[:12]
@@ -10594,6 +10696,7 @@ class DlgFragBackup(ArmoryDialog):
       fragData['FragPixmap'] = self.fragPixmapFn
       fragData['Range'] = zindex
       fragData['Secure'] = self.chkSecurePrint.isChecked()
+      fragData['fragSetID'] = self.uniqueFragSetID
       dlg = DlgPrintBackup(self, self.main, self.wlt, 'Fragments', \
                               self.secureMtrx, self.secureMtrxCrypt, fragData, \
                               self.secureRoot, self.secureChain)
@@ -10645,7 +10748,7 @@ class DlgFragBackup(ArmoryDialog):
 
       try:
          yBin = saveMtrx[zindex][1].toBinStr()
-         binID = self.wlt.uniqueIDBin
+         binID = base58_to_binary(self.uniqueFragSetID)
          IDLine = ComputeFragIDLineHex(M, zindex, binID, doMask, addSpaces=True)
          if len(yBin) == 32:
             fout.write('ID: ' + IDLine + '\n')
@@ -10722,6 +10825,8 @@ class DlgFragBackup(ArmoryDialog):
       N = int(str(self.comboN.currentText()))
       # Make sure only local variables contain non-SBD data
       self.destroyFrags()
+      self.uniqueFragSetID = \
+         binary_to_base58(SecureBinaryData().GenerateRandom(6).toBinStr())
       insecureData = SplitSecret(self.securePrint, M, self.maxmaxN)
       for x, y in insecureData:
          self.secureMtrx.append([SecureBinaryData(x), SecureBinaryData(y)])
@@ -10740,7 +10845,8 @@ class DlgFragBackup(ArmoryDialog):
       #####
 
       self.M, self.N = M, N
-      self.fragPrefixStr = ComputeFragIDBase58(self.M, self.wlt.uniqueIDBin)
+      self.fragPrefixStr = ComputeFragIDBase58(self.M, \
+                              base58_to_binary(self.uniqueFragSetID))
       self.fragPixmapFn = ':/frag%df.png' % M
 
 
@@ -11733,11 +11839,10 @@ class DlgRestoreFragged(ArmoryDialog):
          '<b>Start entering fragments into the table to left...</b>'))
       for row, data in self.fragDataMap.iteritems():
          showRightFrm = True
-         M, fnum, wltIDBin, doMask, idBase58 = ReadFragIDLineBin(data[0])
+         M, fnum, setIDBin, doMask, idBase58 = ReadFragIDLineBin(data[0])
          self.lblRightFrm.setText(self.tr('<b><u>Wallet Being Restored:</u></b>'))
          self.imgPie.setPixmap(QPixmap(':/frag%df.png' % M).scaled(96,96))
          self.lblReqd.setText(self.tr('<b>Frags Needed:</b> %1').arg(M))
-         self.lblWltID.setText(self.tr('<b>Wallet:</b> %1').arg(binary_to_base58(wltIDBin)))
          self.lblFragID.setText(self.tr('<b>Fragments:</b> %1').arg(idBase58.split('-')[0]))
          self.btnRestore.setEnabled(len(self.fragDataMap) >= M)
          break
@@ -12431,7 +12536,7 @@ def verifyRecoveryTestID(parent, computedWltID, expectedWltID=None):
             'Computed wallet ID: %1 <br>'
             'Expected wallet ID: %2 <br><br>'
             'Is it possible that you loaded a different backup than the '
-            'one you just made?').arg(computedWltID, 'expectedWltID'), \
+            'one you just made?').arg(computedWltID, expectedWltID), \
             QMessageBox.Ok)
       else:
          MsgBoxCustom(MSGBOX.Good, parent.tr('Backup is Good!'), parent.tr(
@@ -13135,7 +13240,8 @@ class DlgCorruptWallet(DlgProgress):
          wlt = None
          wltPath = ''
 
-         if isinstance(self.walletList[0], str):
+         if isinstance(self.walletList[0], str) or \
+            isinstance(self.walletList[0], unicode):
             wltPath = self.walletList[0]
          else:
             wlt = self.walletList[0]

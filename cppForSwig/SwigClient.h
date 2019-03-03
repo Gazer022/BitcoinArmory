@@ -37,6 +37,7 @@ namespace SwigClient
 
    class BlockDataViewer;
 
+   ///////////////////////////////////////////////////////////////////////////////
    struct NoArmoryDBExcept : public runtime_error
    {
       NoArmoryDBExcept(void) : runtime_error("")
@@ -46,6 +47,18 @@ namespace SwigClient
    struct BDVAlreadyRegistered : public runtime_error
    {
       BDVAlreadyRegistered(void) : runtime_error("")
+      {}
+   };
+
+   ///////////////////////////////////////////////////////////////////////////////
+   struct FeeEstimateStruct
+   {
+      const string error_;
+      const float val_;
+      const bool isSmart_;
+
+      FeeEstimateStruct(float val, bool isSmart, const string& error) :
+         val_(val), isSmart_(isSmart), error_(error)
       {}
    };
 
@@ -313,11 +326,12 @@ namespace SwigClient
 
       //save all tx we fetch by hash to reduce resource cost on redundant fetches
       shared_ptr<map<BinaryData, Tx> > txMap_;
+      shared_ptr<map<BinaryData, BinaryData> > rawHeaderMap_;
 
       mutable unsigned topBlock_ = 0;
 
    private:
-      BlockDataViewer(void) { txMap_ = make_shared<map<BinaryData, Tx>>(); }
+      BlockDataViewer(void);
       BlockDataViewer(const shared_ptr<BinarySocket> sock);
       bool isValid(void) const { return sock_ != nullptr; }
 
@@ -361,13 +375,14 @@ namespace SwigClient
 
       void broadcastZC(const BinaryData& rawTx);
       Tx getTxByHash(const BinaryData& txHash);
+      BinaryData getRawHeaderForTxHash(const BinaryData& txHash);
 
       void updateWalletsLedgerFilter(const vector<BinaryData>& wltIdVec);
       bool hasRemoteDB(void);
 
       NodeStatusStruct getNodeStatus(void);
       unsigned getTopBlock(void) const { return topBlock_; }
-      float estimateFee(unsigned);
+      FeeEstimateStruct estimateFee(unsigned, const string&);
 
       vector<LedgerEntryData> getHistoryForWalletSelection(
          const vector<string>& wldIDs, const string& orderingStr);
@@ -390,7 +405,7 @@ namespace SwigClient
 
    private:
 
-      void hold();
+      void hodl();
 
    public:
       ProcessMutex(const string& addr, const string& port) :

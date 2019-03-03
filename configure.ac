@@ -1,5 +1,5 @@
 AC_PREREQ(2.60)
-AC_INIT([BitcoinArmory], [0.96.1], [moothecowlord@gmail.com])
+AC_INIT([BitcoinArmory], [0.96.5], [moothecowlord@gmail.com])
 
 AM_INIT_AUTOMAKE([1.10 subdir-objects foreign -Wall -Werror])
 
@@ -47,6 +47,8 @@ AM_CONDITIONAL([HAVE_GUI], [test "x$with_gui" = "xyes"])
 AC_PROG_CC
 AC_PROG_CXX
 AM_CONDITIONAL([HAVE_GCC], [test $CXX = g++])
+AC_CHECK_SIZEOF([long unsigned int])
+AM_CONDITIONAL([HAVE_64BIT], [test $ac_cv_sizeof_long_unsigned_int = 8])
 
 AC_CONFIG_MACRO_DIR([m4])
 m4_include([m4/ax_check_compile_flag.m4])

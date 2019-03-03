@@ -23,6 +23,7 @@ using namespace std;
 #include "Signer.h"
 #include "BlockDataManagerConfig.h"
 #include "CoinSelection.h"
+#include "Script.h"
 
 enum AddressType
 {
@@ -45,7 +46,7 @@ private:
    WalletContainer* const walletContainer_;
 
    vector<UTXO> state_utxoVec_;
-   const uint64_t spendableBalance_;
+   uint64_t spendableBalance_;
 
 private:
    static void decorateUTXOs(WalletContainer* const, vector<UTXO>&);
@@ -56,20 +57,22 @@ private:
       SwigClient::Lockbox* const, unsigned M, unsigned N);
 
    uint64_t getSpendVal(void) const;
-   void checkSpendVal(void) const;
+   void checkSpendVal(uint64_t) const;
    void addRecipient(unsigned, const BinaryData&, uint64_t);
 
    static shared_ptr<ScriptRecipient> createRecipient(const BinaryData&, uint64_t);
    
    void selectUTXOs(vector<UTXO>&, uint64_t fee, float fee_byte, unsigned flags);
 public:
-   CoinSelectionInstance(WalletContainer* const walletContainer);
+   CoinSelectionInstance(WalletContainer* const walletContainer,
+      const vector<AddressBookEntry>& addrBook);
    CoinSelectionInstance(SwigClient::Lockbox* const, 
       unsigned M, unsigned N,
       unsigned blockHeight, uint64_t balance);
 
    unsigned addRecipient(const BinaryData&, uint64_t);
    void updateRecipient(unsigned, const BinaryData&, uint64_t);
+   void updateOpReturnRecipient(unsigned, const BinaryData&);
    void removeRecipient(unsigned);
    void resetRecipients(void);
 
@@ -90,6 +93,8 @@ public:
    float getFeeByte(void) const { return selection_.fee_byte_; }
 
    bool isSW(void) const { return selection_.witnessSize_ != 0; }
+
+   void rethrow(void) { cs_.rethrow(); }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -189,7 +194,7 @@ public:
          auto hashType = asset->getAddressTypeForHash(
             count.first.getSliceRef(1, count.first.getSize() - 1));
 
-         updateWallet = asset->setAddressEntryType(hashType);
+         updateWallet |= asset->setAddressEntryType(hashType);
       }
 
       if (updateWallet)
@@ -317,6 +322,37 @@ public:
       return type;
    }
 
+   AddressType getAddrTypeForIndex_WithScript(int index, const BinaryData& h160)
+   {
+      auto addrType = wallet_->getAddrTypeForIndex(index, h160);
+
+      AddressType type;
+      switch (addrType)
+      {
+      case AddressEntryType_P2PKH:
+         type = AddressType_P2PKH;
+         break;
+
+      case AddressEntryType_Nested_Multisig:
+      case AddressEntryType_Nested_P2WSH:
+         type = AddressType_Multisig;
+         break;
+
+      case AddressEntryType_Nested_P2WPKH:
+         type = AddressType_P2SH_P2WPKH;
+         break;
+
+      case AddressEntryType_Nested_P2PK:
+         type = AddressType_P2SH_P2PK;
+         break;
+
+      default:
+         throw WalletException("invalid address type");
+      }
+
+      return type;
+   }
+
    SwigClient::ScrAddrObj getAddrObjByIndex(int index)
    {
       auto addrPtr = wallet_->getAddressEntryForIndex(index);
@@ -364,7 +400,8 @@ public:
 
    CoinSelectionInstance getCoinSelectionInstance(void)
    {
-      return CoinSelectionInstance(this);
+      auto&& addrBookVector = createAddressBook();
+      return CoinSelectionInstance(this, addrBookVector);
    }
 
    unsigned getTopBlock(void);
@@ -373,19 +410,23 @@ public:
    int convertToImportIndex(int);
    int convertFromImportIndex(int);
    void removeAddressBulk(const vector<BinaryData>&);
+
+   vector<BinaryData> getScriptHashVectorForIndex(int) const;
 };
 
-class ResolvedFeed_PythonWalletSingle;
+class ResolverFeed_PythonWalletSingle;
 
 ////////////////////////////////////////////////////////////////////////////////
 class PythonSigner
 {
-   friend class ResolvedFeed_PythonWalletSingle;
+   friend class ResolverFeed_PythonWalletSingle;
 
 private:
-   unique_ptr<Signer> signer_;
    shared_ptr<AssetWallet> walletPtr_;
-   shared_ptr<ResolvedFeed_PythonWalletSingle> feedPtr_;
+
+protected:
+   unique_ptr<Signer> signer_;
+   shared_ptr<ResolverFeed_PythonWalletSingle> feedPtr_;
 
 public:
    PythonSigner(WalletContainer& wltContainer)
@@ -399,12 +440,11 @@ public:
       if (walletSingle == nullptr)
          throw WalletException("unexpected wallet type");
 
-      feedPtr_ = make_shared<ResolvedFeed_PythonWalletSingle>(
+      feedPtr_ = make_shared<ResolverFeed_PythonWalletSingle>(
          walletSingle, this);
-
    }
 
-   void addSpender(
+   virtual void addSpender(
       uint64_t value, 
       uint32_t height, uint16_t txindex, uint16_t outputIndex, 
       const BinaryData& txHash, const BinaryData& script, unsigned sequence)
@@ -423,7 +463,7 @@ public:
       auto txOutRef = BtcUtils::getTxOutScrAddrNoCopy(script);
 
       auto p2pkh_prefix =
-        SCRIPT_PREFIX(BlockDataManagerConfig::getPubkeyHashPrefix());
+         SCRIPT_PREFIX(BlockDataManagerConfig::getPubkeyHashPrefix());
       auto p2sh_prefix =
          SCRIPT_PREFIX(BlockDataManagerConfig::getScriptHashPrefix());
 
@@ -432,6 +472,11 @@ public:
          recipient = make_shared<Recipient_P2PKH>(txOutRef.scriptRef_, value);
       else if (txOutRef.type_ == p2sh_prefix)
          recipient = make_shared<Recipient_P2SH>(txOutRef.scriptRef_, value);
+      else if (txOutRef.type_ == SCRIPT_PREFIX_OPRETURN)
+         recipient = make_shared<Recipient_OPRETURN>(txOutRef.scriptRef_);
+      else if (txOutRef.type_ == SCRIPT_PREFIX_P2WSH ||
+         txOutRef.type_ == SCRIPT_PREFIX_P2WPKH)
+         recipient = make_shared<Recipient_Bech32>(txOutRef.scriptRef_, value);
       else
          throw WalletException("unexpected output type");
 
@@ -471,9 +516,142 @@ public:
       return signer_->isInputSW(id);
    }
 
+   BinaryData serializeSignedTx() const
+   {
+      return signer_->serialize();
+   }
+
+   BinaryData serializeState(void) const
+   {
+      return signer_->serializeState();
+   }
+
    virtual ~PythonSigner(void) = 0;
    virtual const SecureBinaryData& getPrivateKeyForIndex(unsigned) = 0;
    virtual const SecureBinaryData& getPrivateKeyForImportIndex(unsigned) = 0;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+class PythonSigner_BCH : public PythonSigner
+{
+public:
+   PythonSigner_BCH(WalletContainer& wltContainer) :
+      PythonSigner(wltContainer)
+   {
+      signer_ = make_unique<Signer_BCH>();
+   }
+
+   void addSpender(
+      uint64_t value,
+      uint32_t height, uint16_t txindex, uint16_t outputIndex,
+      const BinaryData& txHash, const BinaryData& script, unsigned sequence)
+   {
+      UTXO utxo(value, height, txindex, outputIndex, txHash, script);
+
+      //set spenders
+      auto spenderPtr = make_shared<ScriptSpender_BCH>(utxo, feedPtr_);
+      spenderPtr->setSequence(sequence);
+
+      signer_->addSpender(spenderPtr);
+   }
+};
+
+class ResolverFeed_Universal;
+
+////////////////////////////////////////////////////////////////////////////////
+class UniversalSigner
+{
+private:
+   unique_ptr<Signer> signer_;
+   shared_ptr<ResolverFeed_Universal> feedPtr_;
+
+public:
+   UniversalSigner(const string& signerType);
+
+   virtual ~UniversalSigner(void) = 0;
+
+   void updateSignerState(const BinaryData& state)
+   {
+      signer_->deserializeState(state);
+   }
+
+   void populateUtxo(const BinaryData& hash, unsigned txoId, 
+                uint64_t value, const BinaryData& script)
+   {
+      UTXO utxo(value, UINT32_MAX, UINT32_MAX, txoId, hash, script);
+      signer_->populateUtxo(utxo);
+   }
+
+   void signTx(void)
+   {
+      signer_->sign();
+   }
+
+   void setLockTime(unsigned locktime)
+   {
+      signer_->setLockTime(locktime);
+   }
+
+   void setVersion(unsigned version)
+   {
+      signer_->setVersion(version);
+   }
+
+   void addSpenderByOutpoint(
+      const BinaryData& hash, unsigned index, unsigned sequence, uint64_t value)
+   {
+      signer_->addSpender_ByOutpoint(hash, index, sequence, value);
+   }
+
+   void addRecipient(uint64_t value, const BinaryData& script)
+   {
+      auto recipient = make_shared<Recipient_Universal>(script, value);
+      signer_->addRecipient(recipient);
+   }
+
+   BinaryData getSignedTx(void)
+   {
+      BinaryData finalTx(signer_->serialize());
+      return finalTx;
+   }
+
+   const BinaryData& getSigForInputIndex(unsigned id) const
+   {
+      return signer_->getSigForInputIndex(id);
+   }
+
+   BinaryData getWitnessDataForInputIndex(unsigned id)
+   {
+      return BinaryData(signer_->getWitnessData(id));
+   }
+
+   bool isInptuSW(unsigned id) const
+   {
+      return signer_->isInputSW(id);
+   }
+
+   BinaryData serializeState(void) const
+   {
+      return signer_->serializeState();
+   }
+
+   void deserializeState(const BinaryData& state)
+   {
+      signer_->deserializeState(state);
+   }
+
+   TxEvalState getSignedState(void) const
+   {
+      return signer_->evaluateSignedState();
+   }
+
+   BinaryData serializeSignedTx() const
+   {
+      return signer_->serialize();
+   }
+
+   virtual string getPublicDataForKey(const string&) = 0;
+   virtual const SecureBinaryData& getPrivDataForKey(const string&) = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -497,13 +675,32 @@ public:
 };
 
 ////////////////////////////////////////////////////////////////////////////////
-class ResolvedFeed_PythonWalletSingle : public ResolvedFeed_AssetWalletSingle
+class PythonVerifier_BCH
+{
+private:
+   unique_ptr<Signer_BCH> signer_;
+
+public:
+   PythonVerifier_BCH()
+   {
+      signer_ = make_unique<Signer_BCH>();
+   }
+
+   bool verifySignedTx(const BinaryData& rawTx,
+      const map<BinaryData, map<unsigned, BinaryData> >& utxoMap)
+   {
+      return signer_->verifyRawTx(rawTx, utxoMap);
+   }
+};
+
+////////////////////////////////////////////////////////////////////////////////
+class ResolverFeed_PythonWalletSingle : public ResolvedFeed_AssetWalletSingle
 {
 private:
    PythonSigner* signerPtr_ = nullptr;
 
 public:
-   ResolvedFeed_PythonWalletSingle(
+   ResolverFeed_PythonWalletSingle(
       shared_ptr<AssetWallet_Single> walletPtr,
       PythonSigner* signerptr) :
       ResolvedFeed_AssetWalletSingle(walletPtr),
@@ -526,6 +723,40 @@ public:
 
       id = AssetWallet::convertToImportIndex(id);
       return signerPtr_->getPrivateKeyForImportIndex(id);
+   }
+};
+
+////////////////////////////////////////////////////////////////////////////////
+class ResolverFeed_Universal : public ResolverFeed
+{
+private:
+   UniversalSigner* signerPtr_ = nullptr;
+
+public:
+   ResolverFeed_Universal(UniversalSigner* signerptr) :
+      signerPtr_(signerptr)
+   {
+      if (signerPtr_ == nullptr)
+         throw WalletException("null signer ptr");
+   }
+
+   const SecureBinaryData& getPrivKeyForPubkey(const BinaryData& pubkey)
+   {
+      auto&& pubkey_hex = pubkey.toHexStr();
+      auto& data = signerPtr_->getPrivDataForKey(pubkey_hex);
+      if (data.getSize() == 0)
+         throw runtime_error("invalid value");
+      return data;
+   }
+
+   BinaryData getByVal(const BinaryData& val)
+   {
+      auto&& val_str = val.toHexStr();
+      auto data_str = signerPtr_->getPublicDataForKey(val_str);
+      if (data_str.size() == 0)
+         throw runtime_error("invalid value");
+      BinaryData data_bd(data_str);
+      return data_bd;
    }
 };
 

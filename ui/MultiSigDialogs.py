@@ -24,6 +24,10 @@ from armoryengine.CoinSelection import PySelectCoins, PyUnspentTxOut, \
 import cStringIO
 import textwrap
 
+from SignerSelectDialog import SignerLabelFrame
+from armoryengine.SignerWrapper import SIGNER_DEFAULT, SIGNER_LEGACY, \
+   SIGNER_CPP, SIGNER_BCH
+
 #############################################################################
 class DlgLockboxEditor(ArmoryDialog):
 
@@ -784,13 +788,16 @@ class DlgLockboxManager(ArmoryDialog):
       tblgeom  = self.main.settings.get('LockboxAddrCols')
       ledggeom = self.main.settings.get('LockboxLedgerCols')
 
-      if len(hexgeom) > 0:
-         geom = QByteArray.fromHex(hexgeom)
-         self.restoreGeometry(geom)
-      if len(tblgeom) > 0:
-         restoreTableView(self.lboxView, tblgeom)
-      if len(ledggeom) > 0:
-         restoreTableView(self.ledgerView, ledggeom)
+      try:
+         if len(hexgeom) > 0:
+            geom = QByteArray.fromHex(hexgeom)
+            self.restoreGeometry(geom)
+         if len(tblgeom) > 0:
+            restoreTableView(self.lboxView, tblgeom)
+         if len(ledggeom) > 0:
+            restoreTableView(self.ledgerView, ledggeom)
+      except:
+         pass
 
       self.changeLBFilter()
 
@@ -1126,6 +1133,20 @@ class DlgLockboxManager(ArmoryDialog):
       self.btnQRCodeDisp  = QPushButton(self.tr('QR Code'))
       self.btnFundRequest = QPushButton(self.tr('Request Payment'))
       self.btnCopyClip = QPushButton(self.tr('Copy Address'))
+      
+      #segwit checkbox
+      self.chkSegWit = QCheckBox("SegWit")
+      self.chkSegWit.setChecked(False)
+      
+      def checkSegWit():
+         lbox = self.getSelectedLockbox()
+         if self.chkSegWit.isChecked() == True:
+            lbox.setScriptType(LBTYPE_NESTED_P2WSH)
+         else:
+            lbox.setScriptType(LBTYPE_P2SH)
+         updateRegFundCell(True, TheBDM.getState() == BDM_BLOCKCHAIN_READY)
+         
+      self.connect(self.chkSegWit, SIGNAL('clicked()'), checkSegWit)
 
       def funcCopyClip():  
          lbox = self.getSelectedLockbox()
@@ -1134,21 +1155,21 @@ class DlgLockboxManager(ArmoryDialog):
          self.btnCopyClip.setText('Copied!')
          clipb = QApplication.clipboard()
          clipb.clear()
-         clipb.setText(scrAddr_to_addrStr(lbox.p2shScrAddr))
-         reactor.callLater(1, lambda: self.btnCopyClip.setText('Copy Address'))
+         clipb.setText(scrAddr_to_addrStr(lbox.getAddr()))
+         self.main.signalExecution.callLater(1, lambda: self.btnCopyClip.setText('Copy Address'))
 
       def funcReqPayment():  
          lbox = self.getSelectedLockbox()
          if not lbox:
             return
-         p2shAddr = scrAddr_to_addrStr(lbox.p2shScrAddr)
+         p2shAddr = scrAddr_to_addrStr(lbox.getAddr())
          DlgRequestPayment(self, self.main, p2shAddr).exec_()
 
       def funcQRCode():
          lbox = self.getSelectedLockbox()
          if not lbox:
             return
-         p2shAddr = scrAddr_to_addrStr(lbox.p2shScrAddr)
+         p2shAddr = scrAddr_to_addrStr(lbox.getAddr())
          lboxDisp = 'Lockbox %d-of-%d: "%s" (%s)' % (lbox.M, lbox.N, 
                            lbox.shortName, lbox.uniqueIDB58)
          DlgQRCodeDisplay(self, self.main, p2shAddr, p2shAddr, lboxDisp).exec_()
@@ -1167,25 +1188,39 @@ class DlgLockboxManager(ArmoryDialog):
             self.btnFundRequest.setEnabled(False)
             self.btnCopyClip.setEnabled(False)
             self.lblDispAddr.setEnabled(False)
+            self.chkSegWit.setEnabled(False)
             self.lblDispAddr.setText('No lockbox selected')
          else:
-            p2shAddr = scrAddr_to_addrStr(lbox.p2shScrAddr)
+            p2shAddr = scrAddr_to_addrStr(lbox.getAddr())
             self.btnFundRegular.setEnabled(isOnline)
             self.btnQRCodeDisp.setEnabled(True)
             self.btnFundRequest.setEnabled(True)
             self.btnCopyClip.setEnabled(True)
             self.lblDispAddr.setEnabled(True)
+            self.chkSegWit.setEnabled(True)
             self.lblDispAddr.setText(self.tr(
                'Anyone can send funds to this lockbox using this '
                'Bitcoin address: <br><b>%1</b>').arg(p2shAddr))
-
+            
+      def setSWCheckBox(arg1, arg2):
+         lbox = self.getSelectedLockbox()
+         if lbox == None:
+            return
+         
+         if lbox.getScriptType() != LBTYPE_NESTED_P2WSH:
+            self.chkSegWit.setChecked(False)
+         else:
+            self.chkSegWit.setChecked(True)
+            
       self.updateDashFuncs.append(updateRegFundCell)
+      self.updateDashFuncs.append(setSWCheckBox)
 
       layoutFundRow = QGridLayout()
-      layoutFundRow.addWidget( self.btnFundRegular,  0,2)
-      layoutFundRow.addWidget( self.btnQRCodeDisp,   0,3)
-      layoutFundRow.addWidget( self.btnFundRequest,  0,4)
-      layoutFundRow.addWidget( self.btnCopyClip,     0,5)
+      layoutFundRow.addWidget( self.btnFundRegular,  0,1)
+      layoutFundRow.addWidget( self.btnQRCodeDisp,   0,2)
+      layoutFundRow.addWidget( self.btnFundRequest,  0,3)
+      layoutFundRow.addWidget( self.btnCopyClip,     0,4)
+      layoutFundRow.addWidget( self.chkSegWit,       0,5)
       layoutFundRow.addWidget( self.lblDispAddr,     1,1, 1,6)
       layoutFundRow.setColumnStretch(0, 1)
       layoutFundRow.setColumnStretch(1, 1)
@@ -1278,9 +1313,9 @@ class DlgLockboxManager(ArmoryDialog):
       row, col = index.row(), index.column()
       currComment = str(view.model().index(row, LEDGERCOLS.Comment).data().toString())
       if not currComment:
-          dialog = DlgSetComment(self, self.main, currComment, self.tr('Add Transaction Comment'))
+         dialog = DlgSetComment(self, self.main, currComment, self.tr('Add Transaction Comment'))
       else:          
-          dialog = DlgSetComment(self, self.main, currComment, self.tr('Change Transaction Comment'))
+         dialog = DlgSetComment(self, self.main, currComment, self.tr('Change Transaction Comment'))
       if dialog.exec_():
          newComment = str(dialog.edtComment.text())
          lboxId = str(view.model().index(row, LEDGERCOLS.WltID).data().toString())
@@ -1463,7 +1498,7 @@ class DlgLockboxManager(ArmoryDialog):
          elif action == actionCopyBalance:
             clippy = getModelStr(LOCKBOXCOLS.Balance)
          elif action == actionRemoveLB:
-            dispInfo = self.main.getDisplayStringForScript(lbox.binScript)
+            dispInfo = self.main.getDisplayStringForScript(lbox.getScript())
             reply = QMessageBox.warning(self, self.tr('Confirm Delete'), self.tr(
                '"Removing" a lockbox does not delete any signing keys, so you '
                'maintain signing authority for any coins that are sent there. '  
@@ -2492,9 +2527,7 @@ class DlgMultiSpendReview(ArmoryDialog):
       self.pixChk   = lambda: QPixmap(':/checkmark32.png'  ).scaled(CHKW,CHKH)
       self.pixPie   = lambda m: QPixmap(':/frag%df.png'%m  ).scaled(PIEW,PIEH)
 
-      layout = QVBoxLayout()
-
-      self.ustx = UnsignedTransaction().unserialize(ustx.serialize())
+      self.ustx = ustx
       self.feeAmt = self.ustx.calculateFee()
 
 
@@ -2509,6 +2542,7 @@ class DlgMultiSpendReview(ArmoryDialog):
             self.wltOfflineSign = []
             self.wltSignRightNow = []
             self.keyholePixmap = []
+            self.keyUnrelated = []
 
       # Some simple container classes
       class OutputBundle(object):
@@ -2552,8 +2586,13 @@ class DlgMultiSpendReview(ArmoryDialog):
             iBundle.wltOfflineSign  = [None]*N
             iBundle.wltSignRightNow = [None]*N
             iBundle.keyholePixmap   = [None]*N
+            iBundle.keyUnrelated    = [None]*N
             for i in range(N):
-               a160 = iBundle.lockbox.a160List[i]
+               this_lb = iBundle.lockbox
+               a160 = this_lb.a160List[i]
+               dpubkey = this_lb.dPubKeys[i].binPubKey
+               cpubkey = this_lb.compressedPubKeys[i]
+
                wltID = self.main.getWalletForAddr160(a160)
                iBundle.keyholePixmap[i] = QLabel()
                iBundle.keyholePixmap[i].setPixmap(self.pixWhite())
@@ -2561,10 +2600,12 @@ class DlgMultiSpendReview(ArmoryDialog):
                   wlt = self.main.walletMap[wltID]
                   wltType = determineWalletType(wlt, self.main)[0]
                   if wltType in [WLTTYPES.WatchOnly, WLTTYPES.Offline]:
-                     iBundle.wltOfflineSign[i] = [wltID, a160]
+                     iBundle.wltOfflineSign[i] = [wltID, a160, dpubkey, cpubkey]
                   else:
-                     iBundle.wltSignRightNow[i] = [wltID, a160]
+                     iBundle.wltSignRightNow[i] = [wltID, a160, dpubkey, cpubkey]
                      iBundle.keyholePixmap[i].setPixmap(self.pixGreen())
+               else:
+                  iBundle.keyUnrelated[i] = [None, a160, dpubkey, cpubkey]
          else:
             iBundle.wltOfflineSign  = [None]
             iBundle.wltSignRightNow = [None]
@@ -2582,7 +2623,7 @@ class DlgMultiSpendReview(ArmoryDialog):
                   iBundle.wltOfflineSign[0] = [wltID, a160]
                   iBundle.keyholePixmap[0].setPixmap(self.pixWhite())
                else:
-                  iBundle.wltSignRightNow[0] = [wltID, a160]
+                  iBundle.wltSignRightNow[0] = [wltID, a160, None, None]
                   iBundle.keyholePixmap[0].setPixmap(self.pixGreen())
             else:
                # In these cases, nothing really to do
@@ -2634,7 +2675,11 @@ class DlgMultiSpendReview(ArmoryDialog):
 
       self.iWidgets = {}
       self.oWidgets = {}
-
+      
+      
+      self.signerType = SIGNER_DEFAULT
+      def setSignerType(_type):
+         self.signerType = _type
 
       iin = 0
       iout = 0
@@ -2689,7 +2734,7 @@ class DlgMultiSpendReview(ArmoryDialog):
 
          def createSignCallback(idstring, nIdx):
             def doSign():
-               self.doSignForInput(idstring, nIdx)
+               self.doSignForInput(idstring, nIdx, self.signerType)
             return doSign
 
 
@@ -2831,6 +2876,8 @@ class DlgMultiSpendReview(ArmoryDialog):
       frmOutputs = QFrame()
       frmOutputs.setLayout(layoutOutputs)
       frmOutputs.setFrameStyle(STYLE_STYLED)
+            
+      self.signerSelectFrm = SignerLabelFrame(main, self.ustx, setSignerType)
 
 
 
@@ -2862,6 +2909,7 @@ class DlgMultiSpendReview(ArmoryDialog):
                                HLINE(),
                                frmInputs,
                                HLINE(),
+                               self.signerSelectFrm.getFrame(),                               
                                HLINE(),
                                frmOutputs,
                                HLINE(),
@@ -2889,11 +2937,10 @@ class DlgMultiSpendReview(ArmoryDialog):
    
          
    ############################################################################# 
-   def doSignForInput(self, idStr, keyIdx):
+   def doSignForInput(self, idStr, keyIdx, signerType=SIGNER_DEFAULT):
       ib = self.inputBundles[idStr]
-      wltID, a160 = ib.wltSignRightNow[keyIdx]
+      wltID, a160, dkey, ckey = ib.wltSignRightNow[keyIdx]
       wlt = self.main.walletMap[wltID]
-      pytx = self.ustx.pytxObj
       if wlt.useEncryption and wlt.isLocked:
          dlg = DlgUnlockWallet(wlt, self, self.main, self.tr('Sign Lockbox'))
          if not dlg.exec_():
@@ -2902,20 +2949,36 @@ class DlgMultiSpendReview(ArmoryDialog):
                QMessageBox.Ok)
             return
 
-      if ib.lockbox:
-         # If a lockbox, all USTXIs require the same signing key
-         for ustxi in ib.ustxiList:
-            addrObj = wlt.getAddrByHash160(a160)
-            ustxi.createAndInsertSignature(pytx, addrObj.binPrivKey32_Plain)
-      else:
-         # Not lockboxes... may have to access multiple keys in wallet
-         for ustxi in ib.ustxiList:
-            a160 = CheckHash160(ustxi.scrAddrs[0])
-            addrObj = wlt.getAddrByHash160(a160)
-            ustxi.createAndInsertSignature(pytx, addrObj.binPrivKey32_Plain)
+      try:
+         if ib.lockbox:
 
-      self.evalSigStat()
-      
+            #if any input is not of legacy type, force cpp signer
+            if self.ustx.isSegWit():
+               signerType = SIGNER_CPP
+
+            # If a lockbox, all USTXIs require the same signing key
+            for ustxi in ib.ustxiList:
+               addrObj = wlt.getAddrObjectForHash(a160)
+               ustxi.createAndInsertSignature(\
+                  self.ustx.pytxObj, addrObj.binPrivKey32_Plain, signerType=signerType)
+         else:
+            # Not lockboxes... may have to access multiple keys in wallet
+                        
+            #if any input is not of legacy type, force cpp signer
+            if self.ustx.isSegWit():
+               signerType = SIGNER_CPP
+
+            for ustxi in ib.ustxiList:
+               a160 = CheckHash160(ustxi.scrAddrs[0])
+               addrObj = wlt.getAddrObjectForHash(a160)
+               ustxi.createAndInsertSignature(\
+                  self.ustx.pytxObj, addrObj.binPrivKey32_Plain, signerType=signerType)
+         
+         self.evalSigStat()
+      except SignerException as e:
+         QMessageBox.critical(self, self.tr('Signer Error'), e.message, QMessageBox.Ok)
+
+
    ############################################################################# 
    def evalSigStat(self):
       self.relevancyMap  = {}
@@ -2938,14 +3001,53 @@ class DlgMultiSpendReview(ArmoryDialog):
 
          # Since we are calling this without a wlt, each key state can only
          # be either ALREADY_SIGNED or NO_SIGNATURE (no WLT* possible)
-         isigstat = ib.ustxiList[0].evaluateSigningStatus()
+         isigstat = ib.ustxiList[0].evaluateSigningStatus(pytx=self.ustx.pytxObj)
 
-         N = ib.lockbox.N if ib.lockbox else 1
-         for i in range(N):
+         if ib.lockbox:
+            N = ib.lockbox.N 
+            entryKeyIndex = [None]*N
+
+            #match signing dialog entries to pubkeys in the ustx
+            for v in range(N):
+               ms_key = ib.ustxiList[0].pubKeys[v]
+               for w in range(N):
+                  try:
+                     #check signable wallets first
+                     if ms_key in ib.wltSignRightNow[w]:
+                        entryKeyIndex[v] = w
+                        break
+                  except:
+                     pass
+                  
+                  try:
+                     #check offline wallets otherwise
+                     if ms_key in ib.wltOfflineSign[w]:
+                        entryKeyIndex[v] = w
+                        break
+                  except:
+                     pass
+
+                  try:
+                     #lastly, check unrelated keys
+                     if ms_key in ib.keyUnrelated[w]:
+                        entryKeyIndex[v] = w
+                        break
+                  except:
+                     continue
+
+               #set default index if there are no matches (unkonwn key)
+               if entryKeyIndex[v] == None:
+                  entryKeyIndex[v] = v
+         else:
+            N = 1
+            entryKeyIndex = [0]
+
+         for y in range(N):
+            i = entryKeyIndex[y]
             signBtn = iWidgMap['SignBtn'][i]
             chkLbl  = iWidgMap['ChkImg'][i]
             keyImg  = iWidgMap['KeyImg'][i]
-            if isigstat.statusN[i]==TXIN_SIGSTAT.ALREADY_SIGNED:
+            if isigstat.statusN[y]==TXIN_SIGSTAT.ALREADY_SIGNED:
                chkLbl.setVisible(True)
                chkLbl.setPixmap(self.pixChk())
                signBtn.setEnabled(False)
@@ -3298,7 +3400,6 @@ class DlgCreatePromNote(ArmoryDialog):
             'Currently, Armory does not implement Simulfunding with lockbox '
             'inputs.  Please choose a regular wallet as your input'),
             QMessageBox.Ok)
-         return False
       elif wlt is None:
          LOGERROR('No wallet in map with ID: "%s"' % self.spendFromWltID)
          QMessageBox.critical(self, self.tr('No Wallet Selected'), self.tr(
@@ -3418,9 +3519,28 @@ class DlgCreatePromNote(ArmoryDialog):
 
          rawTx = cppTx.serialize()
          utxoScrAddr = utxo.getRecipientScrAddr()
-         aobj = wlt.getAddrByHash160(CheckHash160(utxoScrAddr))
+         aobj = wlt.getAddrObjectForHash(utxoScrAddr)
          pubKeys = {utxoScrAddr: aobj.binPublicKey65.toBinStr()}
-         ustxiList.append(UnsignedTxInput(rawTx, txoIdx, None, pubKeys))
+
+         p2shMap = {}
+         p2shScript = wlt.cppWallet.getP2SHScriptForHash(utxo.getScript())
+         if len(p2shScript) > 0:
+            p2shKey = binary_to_hex(script_to_scrAddr(script_to_p2sh_script(
+               p2shScript)))
+            p2shMap[p2shKey] = p2shScript  
+            p2shMap[BASE_SCRIPT] = p2shScript
+
+         try:
+            scriptType = Cpp.BtcUtils().getTxOutScriptTypeInt(p2shScript)
+            if scriptType == CPP_TXOUT_P2WPKH:
+               nestedScript = binary_to_hex(p2shScript[2:])
+               pubkey = SecureBinaryData(aobj.getPubKey())
+               compressed_key = CryptoECDSA().CompressPoint(pubkey)
+               p2shMap[nestedScript] = compressed_key.toBinStr()
+         except:
+            pass
+
+         ustxiList.append(UnsignedTxInput(rawTx, txoIdx, p2shMap, pubKeys))
          
 
       funderStr = str(self.edtKeyLabel.text()).strip()
@@ -3494,7 +3614,7 @@ class DlgMergePromNotes(ArmoryDialog):
          #lbTargStr = '<font color="%s"><b>Lockbox %s-of-%s</b>: %s (%s)</font>' % \
             #(htmlColor('TextBlue'), self.lbox.M, self.lbox.N, 
             #self.lbox.shortName, self.lbox.uniqueIDB58)
-         lbTargStr = self.main.getDisplayStringForScript(self.lbox.binScript)
+         lbTargStr = self.main.getDisplayStringForScript(self.lbox.getScript())
          lbTargStr = lbTargStr['String']
          gboxTarget  = QGroupBox(self.tr('Lockbox Being Funded'))
       else:
@@ -3645,7 +3765,7 @@ class DlgMergePromNotes(ArmoryDialog):
       defaultTarg = None
       if self.promMustMatch:
          for lbox in self.main.allLockboxes:
-            if lbox.p2shScrAddr == self.promMustMatch:
+            if lbox.getAddr() == self.promMustMatch:
                defaultTarg = lbox.uniqueIDB58
                break
          else:
@@ -3787,6 +3907,7 @@ class DlgMergePromNotes(ArmoryDialog):
             updUstxi = UnsignedTxInput().unserialize(ustxi.serialize())
             updUstxi.contribID = prom.promID
             updUstxi.contribLabel = prom.promLabel
+            updUstxi.inputID = len(ustxiList)
             ustxiList.append(updUstxi)
 
          if prom.dtxoChange:

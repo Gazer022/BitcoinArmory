@@ -166,7 +166,7 @@ public:
       Blockchain &bc
    ) 
    {
-      map<HashString, BlockHeader> &allHeaders = bc.allHeaders();
+      auto& allHeaders = bc.allHeaders();
       
       size_t index=0;
       
@@ -193,7 +193,7 @@ public:
       BlockFilePosition foundAtPosition{ 0, 0 };
             
       bool foundTopBlock = false;
-      auto topBlockHash = bc.top().getThisHash();
+      auto topBlockHash = bc.top()->getThisHash();
 
       const auto stopIfBlkHeaderRecognized =
       [&allHeaders, &foundAtPosition, &foundTopBlock, &topBlockHash] (
@@ -215,11 +215,11 @@ public:
          if(bhIter == allHeaders.end())
             throw StopReading();
 
-         if (bhIter->second.getThisHash() == topBlockHash)
+         if (bhIter->second->getThisHash() == topBlockHash)
             foundTopBlock = true;
 
-         bhIter->second.setBlockFileNum(pos.first);
-         bhIter->second.setBlockFileOffset(pos.second);
+         bhIter->second->setBlockFileNum(pos.first);
+         bhIter->second->setBlockFileOffset(pos.second);
       };
       
       uint64_t returnedOffset = UINT64_MAX;
@@ -774,7 +774,7 @@ protected:
    
    virtual BinaryData applyBlockRangeToDB(
       uint32_t startBlock, uint32_t endBlock, 
-      const vector<string>& wltIDs
+      const vector<string>& wltIDs, bool reportProgress
    )
    {
       //make sure sdbis are initialized (fresh ids wont have sdbi entries)
@@ -813,6 +813,9 @@ protected:
       const auto progress
          = [&](BDMPhase phase, double prog, unsigned time, unsigned numericProgress)
       {
+         if (!reportProgress)
+            return;
+
          auto&& notifPtr = make_unique<BDV_Notification_Progress>(
             phase, prog, time, numericProgress, wltIDs);
 
@@ -824,7 +827,7 @@ protected:
    
    virtual uint32_t currentTopBlockHeight() const
    {
-      return bdm_->blockchain()->top().getBlockHeight();
+      return bdm_->blockchain()->top()->getBlockHeight();
    }
    
    virtual void wipeScrAddrsSSH(const vector<BinaryData>& saVec)
@@ -871,6 +874,8 @@ BlockDataManager::BlockDataManager(
       config_.magicBytes_
       );
 
+   nodeStatusPollMutex_ = make_shared<mutex>();
+
    try
    {
       openDatabase();
@@ -879,18 +884,20 @@ BlockDataManager::BlockDataManager(
       {
          networkNode_ = make_shared<BitcoinP2P>("127.0.0.1", config_.btcPort_,
             *(uint32_t*)config_.magicBytes_.getPtr());
+         nodeRPC_ = make_shared<NodeRPC>(config_);
       }
       else if (bdmConfig.nodeType_ == Node_UnitTest)
       {
          networkNode_ = make_shared<NodeUnitTest>("127.0.0.1", config_.btcPort_,
             *(uint32_t*)config_.magicBytes_.getPtr());
+         nodeRPC_ = make_shared<NodeRPC_UnitTest>(config_);
       }
       else
       {
          throw DbErrorMsg("invalid node type in bdmConfig");
       }
 
-      nodeRPC_ = make_shared<NodeRPC>(config_);
+      config_.armoryDbType_ = iface_->armoryDbType();
 
       zeroConfCont_ = make_shared<ZeroConfContainer>(
          iface_, networkNode_, config_.zcThreadCount_);
@@ -936,10 +943,12 @@ BlockDataManager::~BlockDataManager()
    dbBuilder_.reset();
    networkNode_.reset();
    readBlockHeaders_.reset();
-   iface_->closeDatabases();
    scrAddrData_.reset();
-   delete iface_;
    
+   if (iface_ != nullptr)
+      iface_->closeDatabases();
+   delete iface_;
+
    blockchain_.reset();
 }
 
@@ -1063,9 +1072,12 @@ void BlockDataManager::resetDatabases(ResetDBMode mode)
       return;
    }
 
-   //we keep all scrAddr data in between db reset/clear
-   scrAddrData_->getAllScrAddrInDB();
-
+   if (config_.armoryDbType_ != ARMORY_DB_SUPER)
+   {
+      //we keep all scrAddr data in between db reset/clear
+      scrAddrData_->getAllScrAddrInDB();
+   }
+   
    switch (mode)
    {
    case Reset_Rescan:
@@ -1078,10 +1090,14 @@ void BlockDataManager::resetDatabases(ResetDBMode mode)
       break;
    }
 
-   //reapply scrAddrData_'s content to the db
-   scrAddrData_->putAddrMapInDB();
 
-   scrAddrData_->clear();
+   if (config_.armoryDbType_ != ARMORY_DB_SUPER)
+   {
+      //reapply scrAddrData_'s content to the db
+      scrAddrData_->putAddrMapInDB();
+
+      scrAddrData_->clear();
+   }
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -1244,6 +1260,43 @@ NodeStatusStruct BlockDataManager::getNodeStatus() const
       return nss;
 
    nss.rpcStatus_ = nodeRPC_->testConnection();
+   if (nss.rpcStatus_ != RpcStatus_Online)
+      pollNodeStatus();
+
    nss.chainState_ = nodeRPC_->getChainStatus();
    return nss;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void BlockDataManager::pollNodeStatus() const
+{
+   if (!nodeRPC_->canPool())
+      return;
+
+   unique_lock<mutex> lock(*nodeStatusPollMutex_, defer_lock);
+
+   if (!lock.try_lock())
+      return;
+
+   auto poll_thread = [this](void)->void
+   {
+      auto nodeRPC = this->nodeRPC_;
+      auto mutexPtr = this->nodeStatusPollMutex_;
+
+      unique_lock<mutex> lock(*mutexPtr);
+
+      unsigned count = 0;
+      while (nodeRPC->testConnection() != RpcStatus_Online)
+      {
+         ++count;
+         if (count > 10)
+            break; //give up after 20sec
+
+         this_thread::sleep_for(chrono::seconds(2));
+      }
+   };
+
+   thread pollThr(poll_thread);
+   if (pollThr.joinable())
+      pollThr.detach();
 }

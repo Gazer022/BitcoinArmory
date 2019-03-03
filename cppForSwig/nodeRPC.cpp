@@ -41,27 +41,22 @@ RpcStatus NodeRPC::setupConnection()
    if (authString.size() == 0)
       return RpcStatus_BadAuth;
 
-   if (basicAuthString_ != authString)
-   {
-      basicAuthString_ = move(authString);
-      auto&& b64_ba = BtcUtils::base64_encode(basicAuthString_);
+   basicAuthString_ = move(authString);
+   auto&& b64_ba = BtcUtils::base64_encode(basicAuthString_);
 
-      socket_->resetHeaders();
-      stringstream auth_header;
-      auth_header << "Authorization: Basic " << b64_ba;
-      socket_->addHeader(auth_header.str());
+   socket_->resetHeaders();
+   stringstream auth_header;
+   auth_header << "Authorization: Basic " << b64_ba;
+   socket_->addHeader(auth_header.str());
 
-      goodNode_ = true;
-      nodeChainState_.reset();
-      
-      auto status = testConnection();
-      if (status == RpcStatus_Online)
-         LOGINFO << "RPC connection established";
+   goodNode_ = true;
+   nodeChainState_.reset();
 
-      return status;
-   }
+   auto status = testConnection();
+   if (status == RpcStatus_Online)
+      LOGINFO << "RPC connection established";
 
-   return RpcStatus_Disabled;
+   return status;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -69,52 +64,68 @@ RpcStatus NodeRPC::testConnection()
 {
    ReentrantLock lock(this);
 
+   RpcStatus state = RpcStatus_Disabled;
+
    if (!goodNode_)
-      return setupConnection();
-
-   goodNode_ = false;
-
-   JSON_object json_obj;
-   json_obj.add_pair("method", "getblockcount");
-
-   try
    {
-      auto&& serializedPacket = JSON_encode(json_obj);
-      auto&& response = socket_->writeAndRead(serializedPacket);
-      auto&& response_obj = JSON_decode(response);
+      state = setupConnection();
+   }
+   else
+   {
+      goodNode_ = false;
 
-      if (response_obj.isResponseValid(json_obj.id_))
+
+      JSON_object json_obj;
+      json_obj.add_pair("method", "getblockcount");
+
+      try
       {
-         goodNode_ = true;
-         return RpcStatus_Online;
-      }
-      else
-      {
-         auto error_ptr = response_obj.getValForKey("error");
-         auto error_obj = dynamic_pointer_cast<JSON_object>(error_ptr);
-         auto error_code_ptr = error_obj->getValForKey("code");
-         auto error_code = dynamic_pointer_cast<JSON_number>(error_code_ptr);
+         auto&& serializedPacket = JSON_encode(json_obj);
+         auto&& response = socket_->writeAndRead(serializedPacket);
+         auto&& response_obj = JSON_decode(response);
 
-         if (error_code == nullptr)
-            throw JSON_Exception("failed to get error code");
-
-         if ((int)error_code->val_ == -28)
+         if (response_obj.isResponseValid(json_obj.id_))
          {
-            return RpcStatus_Error_28;
+            goodNode_ = true;
+            state = RpcStatus_Online;
+         }
+         else
+         {
+            auto error_ptr = response_obj.getValForKey("error");
+            auto error_obj = dynamic_pointer_cast<JSON_object>(error_ptr);
+            auto error_code_ptr = error_obj->getValForKey("code");
+            auto error_code = dynamic_pointer_cast<JSON_number>(error_code_ptr);
+
+            if (error_code == nullptr)
+               throw JSON_Exception("failed to get error code");
+
+            if ((int)error_code->val_ == -28)
+            {
+               state = RpcStatus_Error_28;
+            }
          }
       }
-   }
-   catch (SocketError&)
-   {
-      return RpcStatus_Disabled;
-   }
-   catch (JSON_Exception& e)
-   {
-      LOGERR << "RPC connection test error: " << e.what();
-      return RpcStatus_BadAuth;
+      catch (SocketError&)
+      {
+         state = RpcStatus_Disabled;
+      }
+      catch (JSON_Exception& e)
+      {
+         LOGERR << "RPC connection test error: " << e.what();
+         state = RpcStatus_BadAuth;
+      }
    }
 
-   return RpcStatus_Disabled;
+   bool doCallback = false;
+   if (state != previousState_)
+      doCallback = true;
+
+   previousState_ = state;
+
+   if (doCallback)
+      callback();
+
+   return state;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -147,16 +158,14 @@ string NodeRPC::getAuthString()
       auto&& lines = BlockDataManagerConfig::getLines(datadir);
       if (lines.size() != 1)
       {
-         LOGERR << "unexpected cookie file content";
-         throw runtime_error("");
+         throw runtime_error("unexpected cookie file content");
       }
 
       auto&& keyVals = BlockDataManagerConfig::getKeyValsFromLines(lines, ':');
       auto keyIter = keyVals.find("__cookie__");
       if (keyIter == keyVals.end())
       {
-         LOGERR << "unexpected cookie file content";
-         throw runtime_error("");
+         throw runtime_error("unexpected cookie file content");
       }
 
       return lines[0];
@@ -217,6 +226,85 @@ float NodeRPC::getFeeByte(unsigned blocksToConfirm)
       throw JSON_Exception("invalid response");
 
    return feeBytePtr->val_;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+FeeEstimateResult NodeRPC::getFeeByteSmart(
+   unsigned confTarget, string& strategy)
+{
+   auto fallback = [this, &confTarget](void)->FeeEstimateResult
+   {
+      FeeEstimateResult fer;
+      fer.smartFee_ = false;
+      auto feeByteSimple = getFeeByte(confTarget);
+      if (feeByteSimple == -1.0f)
+         fer.error_ = "error";
+      else
+         fer.feeByte_ = feeByteSimple;
+
+      return fer;
+   };
+
+   FeeEstimateResult fer;
+
+   ReentrantLock lock(this);
+
+   JSON_object json_obj;
+   json_obj.add_pair("method", "estimatesmartfee");
+
+   auto json_array = make_shared<JSON_array>();
+   json_array->add_value(confTarget);
+   if(strategy == FEE_STRAT_CONSERVATIVE || strategy == FEE_STRAT_ECONOMICAL)
+      json_array->add_value(strategy);
+
+   json_obj.add_pair("params", json_array);
+
+   auto&& response = socket_->writeAndRead(JSON_encode(json_obj));
+   auto&& response_obj = JSON_decode(response);
+
+   if (!response_obj.isResponseValid(json_obj.id_))
+      return fallback();
+
+   auto resultPairObj = response_obj.getValForKey("result");
+   auto resultPairPtr = dynamic_pointer_cast<JSON_object>(resultPairObj);
+
+   if (resultPairPtr != nullptr)
+   {
+      auto feeByteObj = resultPairPtr->getValForKey("feerate");
+      auto feeBytePtr = dynamic_pointer_cast<JSON_number>(feeByteObj);
+      if (feeBytePtr != nullptr)
+      {
+         fer.feeByte_ = feeBytePtr->val_;
+         fer.smartFee_ = true;
+
+         auto blocksObj = resultPairPtr->getValForKey("blocks");
+         auto blocksPtr = dynamic_pointer_cast<JSON_number>(blocksObj);
+
+         if (blocksPtr != nullptr)
+            if (blocksPtr->val_ != confTarget)
+               throw JSON_Exception("conf_target mismatch");
+      }
+   }
+
+   auto errorObj = response_obj.getValForKey("error");
+   auto errorPtr = dynamic_pointer_cast<JSON_string>(errorObj);
+
+   if (errorPtr != nullptr)
+   {
+      if (resultPairPtr == nullptr)
+      {
+         //fallback to the estimatefee is the method is missing
+         return fallback();
+      }
+      else
+      {
+         //report smartfee error msg
+         fer.error_ = errorPtr->val_;
+         fer.smartFee_ = true;
+      }
+   }
+
+   return fer;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

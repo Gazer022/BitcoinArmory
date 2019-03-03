@@ -124,8 +124,8 @@ public:
    LDBIter& operator=(LMDB::Iterator&& move);
    LDBIter& operator=(LDBIter&& move);
 
-   bool isNull(void) { return !iter_.isValid(); }
-   bool isValid(void) { return iter_.isValid(); }
+   bool isNull(void) const { return !iter_.isValid(); }
+   bool isValid(void) const { return iter_.isValid(); }
    bool isValid(DB_PREFIX dbpref);
 
    bool readIterData(void);
@@ -373,27 +373,19 @@ public:
 
    /////////////////////////////////////////////////////////////////////////////
    void closeDatabases();
+   void swapDatabases(DB_SELECT, const string&);
 
    /////////////////////////////////////////////////////////////////////////////
    void beginDBTransaction(LMDBEnv::Transaction* tx,
       DB_SELECT db, LMDB::Mode mode) const
    {
-      if (armoryDbType_ == ARMORY_DB_SUPER)
-         *tx = move(LMDBEnv::Transaction(dbEnv_[BLKDATA].get(), mode));
-      else
-         *tx = move(LMDBEnv::Transaction(dbEnv_[db].get(), mode));
+      *tx = move(LMDBEnv::Transaction(dbEnv_[db].get(), mode));
    }
 
    ARMORY_DB_TYPE getDbType(void) const { return armoryDbType_; }
 
    DB_SELECT getDbSelect(DB_SELECT dbs) const
    {
-      if (dbs == HEADERS)
-         return HEADERS;
-
-      if (armoryDbType_ == ARMORY_DB_SUPER)
-         return BLKDATA;
-
       return dbs;
    }
 
@@ -479,7 +471,7 @@ public:
 
    /////////////////////////////////////////////////////////////////////////////
    void readAllHeaders(
-      const function<void(const BlockHeader&, uint32_t, uint8_t)> &callback
+      const function<void(shared_ptr<BlockHeader>, uint32_t, uint8_t)> &callback
       );
 
    /////////////////////////////////////////////////////////////////////////////
@@ -591,6 +583,9 @@ public:
    bool getStoredTxOut(StoredTxOut & stxo,
       const BinaryData& DBkey) const;
 
+   bool getStoredTxOut(
+      StoredTxOut & stxo, const BinaryData& txHash, uint16_t txoutid) const;
+
    void getUTXOflags(map<BinaryData, StoredSubHistory>&) const;
    void getUTXOflags(StoredSubHistory&) const;
 
@@ -605,6 +600,9 @@ public:
 
    bool getStoredSubHistoryAtHgtX(StoredSubHistory& subssh,
       const BinaryData& scrAddrStr, const BinaryData& hgtX) const;
+   
+   bool getStoredSubHistoryAtHgtX(StoredSubHistory& subssh,
+      const BinaryData& dbkey) const;
 
    void getStoredScriptHistorySummary(StoredScriptHistory & ssh,
       BinaryDataRef scrAddrStr) const;
@@ -631,7 +629,7 @@ public:
    uint64_t getBalanceForScrAddr(BinaryDataRef scrAddr, bool withMulti = false);
 
    bool putStoredTxHints(StoredTxHints const & sths);
-   bool getStoredTxHints(StoredTxHints & sths, BinaryDataRef hashPrefix);
+   bool getStoredTxHints(StoredTxHints & sths, BinaryDataRef hashPrefix) const;
    void updatePreferredTxHint(BinaryDataRef hashOrPrefix, BinaryData preferKey);
 
    bool putStoredHeadHgtList(StoredHeadHgtList const & hhl);
@@ -656,7 +654,7 @@ public:
    Tx    getFullTxCopy(BinaryData ldbKey6B) const;
    Tx    getFullTxCopy(uint32_t hgt, uint16_t txIndex) const;
    Tx    getFullTxCopy(uint32_t hgt, uint8_t dup, uint16_t txIndex) const;
-   Tx    getFullTxCopy(uint16_t txIndex, BlockHeader* bhPtr) const;
+   Tx    getFullTxCopy(uint16_t txIndex, shared_ptr<BlockHeader> bhPtr) const;
    TxOut getTxOutCopy(BinaryData ldbKey6B, uint16_t txOutIdx) const;
    TxIn  getTxInCopy(BinaryData ldbKey6B, uint16_t txInIdx) const;
 
@@ -670,9 +668,6 @@ public:
    BinaryData getTxHashForHeightAndIndex(uint32_t height,
       uint8_t  dup,
       uint16_t txIndex);
-
-   StoredTxHints getHintsForTxHash(BinaryDataRef txHash) const;
-
 
    ////////////////////////////////////////////////////////////////////////////
    bool markBlockHeaderValid(BinaryDataRef headHash);
@@ -705,6 +700,7 @@ public:
 
    string getDbName(DB_SELECT) const;
    string getDbPath(DB_SELECT) const;
+   string getDbPath(const string&) const;
 
    void closeDB(DB_SELECT db);
    StoredDBInfo openDB(DB_SELECT);

@@ -18,6 +18,9 @@ StackValue::~StackValue()
 ResolvedStack::~ResolvedStack()
 {}
 
+ResolverFeed::~ResolverFeed()
+{}
+
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 //// StackItem
@@ -700,6 +703,20 @@ void StackInterpreter::processOpCode(const OpCode& oc)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+SIGHASH_TYPE StackInterpreter::getSigHashSingleByte(uint8_t sighashbyte) const
+{
+   return SIGHASH_TYPE(sighashbyte);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+SIGHASH_TYPE StackInterpreter_BCH::getSigHashSingleByte(uint8_t sighashbyte) const
+{
+   if (!(sighashbyte & 0x40))
+      throw ScriptException("invalid sighash for bch sig");
+   return SIGHASH_TYPE(sighashbyte & 0xBF);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void StackInterpreter::op_checksig()
 {
    //pop sig and pubkey from the stack
@@ -714,11 +731,14 @@ void StackInterpreter::op_checksig()
       return;
    }
 
+   txInEvalState_.n_ = 1;
+   txInEvalState_.m_ = 1;
+
    //extract sig and sighash type
    BinaryRefReader brrSig(sigScript);
    auto sigsize = sigScript.getSize() - 1;
    auto sig = brrSig.get_BinaryDataRef(sigsize);
-   auto hashType = (SIGHASH_TYPE)brrSig.get_uint8_t();
+   auto hashType = getSigHashSingleByte(brrSig.get_uint8_t());
 
    //get data for sighash
    if (sigHashDataObject_ == nullptr)
@@ -745,6 +765,9 @@ void StackInterpreter::op_checksig()
 
    bool result = CryptoECDSA().VerifyData(sighashdata, rs, cppPubKey);
    stack_.push_back(move(intToRawBinary(result)));
+
+   if (result)
+      txInEvalState_.pubKeyState_.insert(make_pair(pubkey, true));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -761,7 +784,7 @@ void StackInterpreter::op_checkmultisig()
       throw ScriptException("invalid n");
 
    //pop pubkeys
-   map<unsigned, BTC_PUBKEY> pubkeys;
+   map<unsigned, pair<BTC_PUBKEY, BinaryData>> pubkeys;
    for (unsigned i = 0; i < nI; i++)
    {
       auto&& pubkey = pop_back();
@@ -775,7 +798,11 @@ void StackInterpreter::op_checkmultisig()
 
       BTC_PRNG prng;
       if (cppPubKey.Validate(prng, 3))
-         pubkeys.insert(move(make_pair(i, move(cppPubKey))));
+      {
+         txInEvalState_.pubKeyState_.insert(make_pair(pubkey, false));
+         auto&& pubkeypair = make_pair(move(cppPubKey), pubkey);
+         pubkeys.insert(move(make_pair(i, move(pubkeypair))));
+      }
    }
 
    //pop m
@@ -783,6 +810,9 @@ void StackInterpreter::op_checkmultisig()
    auto mI = rawBinaryToInt(m);
    if (mI < 0 || mI > nI)
       throw ScriptException("invalid m");
+
+   txInEvalState_.n_ = nI;
+   txInEvalState_.m_ = mI;
 
    //pop sigs
    struct sigData
@@ -803,15 +833,16 @@ void StackInterpreter::op_checkmultisig()
       sdata.sig_ = sig.getSliceCopy(0, sig.getSize() - 1);
 
       //grab hash type
-      sdata.hashType_ = (SIGHASH_TYPE)*(sig.getPtr() + sig.getSize() - 1);
+      sdata.hashType_ = 
+         getSigHashSingleByte(*(sig.getPtr() + sig.getSize() - 1));
 
       //push to vector
       sigVec.push_back(move(sdata));
    }
 
    //should have at least as many sigs as m
-   if (sigVec.size() < mI)
-      throw ScriptException("invalid sig count");
+   /*if (sigVec.size() < mI)
+      throw ScriptException("invalid sig count");*/
 
    //check sigs
    map<SIGHASH_TYPE, BinaryData> dataToHash;
@@ -845,8 +876,17 @@ void StackInterpreter::op_checkmultisig()
          auto pubkey = pubkeys[index];
          pubkeys.erase(index--);
 
-         if (CryptoECDSA().VerifyData(hashdata, rs, pubkey))
+#ifdef SIGNER_DEBUG
+         LOGWARN << "Verifying sig for: ";
+         LOGWARN << "   pubkey: " << pubkey.second.toHexStr();
+
+         auto&& msg_hash = BtcUtils::getHash256(hashdata);
+         LOGWARN << "   message: " << hashdata.toHexStr();
+#endif
+            
+         if (CryptoECDSA().VerifyData(hashdata, rs, pubkey.first))
          {
+            txInEvalState_.pubKeyState_[pubkey.second] = true;
             validSigCount++;
             break;
          }        
@@ -916,6 +956,8 @@ void StackInterpreter::checkState()
 {
    if (!isValid_)
       op_verify();
+
+   txInEvalState_.validStack_ = true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -969,6 +1011,25 @@ void StackInterpreter::process_p2wsh(const BinaryData& scriptHash)
    //construct output script
    auto&& swScript = BtcUtils::getP2WSHScript(scriptHash);
    processScript(swScript, true);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+//// StackInterpreter_BCH
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+StackInterpreter_BCH::StackInterpreter_BCH(void) :
+StackInterpreter()
+{
+   sigHashDataObject_ = make_shared<SigHashData_BCH>();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+StackInterpreter_BCH::StackInterpreter_BCH(
+   const TransactionStub* stubPtr, unsigned inputId) :
+StackInterpreter(stubPtr, inputId)
+{
+   sigHashDataObject_ = make_shared<SigHashData_BCH>();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1396,17 +1457,23 @@ void StackResolver::resolveStack()
             resolver.setFlags(flags_);
             resolver.isSW_ = true;
 
-            auto stackptr = move(resolver.getResolvedStack());
+            try
+            {
+               //failed SW should just result in an empty stack instead of an actual throw
+               auto newResolvedStack = make_shared<ResolvedStackWitness>(resolvedStack_);
+               resolvedStack_ = newResolvedStack;
 
-            auto stackptrLegacy = dynamic_pointer_cast<ResolvedStackLegacy>(stackptr);
-            if (stackptrLegacy == nullptr)
-               throw runtime_error("unexpected resolved stack ptr type");
+               auto stackptr = move(resolver.getResolvedStack());
 
-            auto newResolvedStack = make_shared<ResolvedStackWitness>(resolvedStack_);
-            newResolvedStack->setWitnessStack(
-               stackptrLegacy->getStack());
+               auto stackptrLegacy = dynamic_pointer_cast<ResolvedStackLegacy>(stackptr);
+               if (stackptrLegacy == nullptr)
+                  throw runtime_error("unexpected resolved stack ptr type");
 
-            resolvedStack_ = newResolvedStack;
+               newResolvedStack->setWitnessStack(
+                  stackptrLegacy->getStack());
+            }
+            catch (exception&)
+            { }
          }
       }
    }

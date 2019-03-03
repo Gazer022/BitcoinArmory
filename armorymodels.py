@@ -992,7 +992,19 @@ class WalletAddrDispModel(QAbstractTableModel):
       if row>=len(self.addr160List):
          return QVariant('')
       addr = self.wlt.addrMap[self.addr160List[row]]
-      cppaddr = self.wlt.cppWallet.getAddrObjByIndex(addr.chainIndex)
+      addr_index = addr.chainIndex
+
+      try:
+         if addr_index == -2:
+            addr_index = self.wlt.cppWallet.getAssetIndexForAddr(addr.getAddr160())
+            index_import = self.wlt.cppWallet.convertToImportIndex(addr_index)
+            cppaddr = self.wlt.cppWallet.getImportAddrObjByIndex(index_import) 
+         else:
+            cppaddr = self.wlt.cppWallet.getAddrObjByIndex(addr_index)
+      except:
+         LOGERROR('failed to grab address by index %d, original id: %d' % (addr_index, addr.chainIndex))
+         return QVariant()
+
       addr160 = cppaddr.getAddrHash()
       addrB58 = cppaddr.getScrAddr()
       chainIdx = addr.chainIndex+1  # user must get 1-indexed
@@ -1136,7 +1148,7 @@ class TxInDispModel(QAbstractTableModel):
       ustx = None
       if isinstance(pytx, UnsignedTransaction):
          ustx = pytx
-         pytx = ustx.getPyTxSignedIfPossible()
+         pytx = ustx.pytxObj
       self.tx = pytx.copy()
       
       for i,txin in enumerate(self.tx.inputs):
@@ -1166,7 +1178,7 @@ class TxInDispModel(QAbstractTableModel):
             elif ustx is None:
                self.dispTable[-1].append(CPP_TXIN_SCRIPT_NAMES[scrType])
             else:
-               isSigned = ustx.ustxInputs[i].evaluateSigningStatus().allSigned
+               isSigned = ustx.ustxInputs[i].evaluateSigningStatus(pytx=pytx).allSigned
                self.dispTable[-1].append('Signed' if isSigned else 'Unsigned')
                
             self.dispTable[-1].append(int_to_hex(txin.intSeq, widthBytes=4))

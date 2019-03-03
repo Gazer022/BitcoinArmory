@@ -11,6 +11,9 @@ AM_CXXFLAGS = $(CXXFLAGS) -std=c++11
 
 if HAVE_GCC
 SWIG_FLAGS += -D__GNUC__
+if HAVE_64BIT
+SWIG_FLAGS += -D__LP64__
+endif
 endif
 
 if HAVE_CLANG
@@ -28,7 +31,7 @@ INCLUDE_FILES = UniversalTimer.h BinaryData.h lmdb_wrapper.h \
 	FcgiMessage.h BlockDataManagerConfig.h \
 	Transactions.h Script.h Signer.h nodeRPC.h JSON_codec.h \
 	ReentrantLock.h StringSockets.h log.h OS_TranslatePath.h \
-	TransactionBatch.h
+	TransactionBatch.h BlockchainScanner_Super.h SigHashEnum.h TxEvalState.h
 
 DB_SOURCE_FILES = UniversalTimer.cpp BinaryData.cpp lmdb_wrapper.cpp \
 	BtcUtils.cpp DBUtils.cpp BlockObj.cpp BlockUtils.cpp EncryptionUtils.cpp \
@@ -36,11 +39,11 @@ DB_SOURCE_FILES = UniversalTimer.cpp BinaryData.cpp lmdb_wrapper.cpp \
 	BDM_mainthread.cpp BDM_supportClasses.cpp \
 	BlockDataViewer.cpp HistoryPager.cpp Progress.cpp \
 	txio.cpp TxClasses.cpp StoredBlockObj.cpp \
-	DatabaseBuilder.cpp BlockchainScanner.cpp BlockDataMap.cpp \
+	DatabaseBuilder.cpp BlockchainScanner.cpp BlockchainScanner_Super.cpp BlockDataMap.cpp \
 	DataObject.cpp BitcoinP2P.cpp BDM_Server.cpp BDM_seder.cpp SocketObject.cpp \
 	FcgiMessage.cpp BlockDataManagerConfig.cpp \
 	Transactions.cpp Script.cpp Signer.cpp nodeRPC.cpp JSON_codec.cpp \
-	StringSockets.cpp main.cpp ReentrantLock.cpp log.cpp
+	StringSockets.cpp main.cpp ReentrantLock.cpp log.cpp TxEvalState.cpp
 
 CPPBLOCKUTILS_SOURCE_FILES = UniversalTimer.cpp BinaryData.cpp \
 	BtcUtils.cpp DBUtils.cpp EncryptionUtils.cpp \
@@ -49,8 +52,9 @@ CPPBLOCKUTILS_SOURCE_FILES = UniversalTimer.cpp BinaryData.cpp \
 	BlockDataManagerConfig.cpp TxClasses.cpp \
 	WalletManager.cpp Wallets.cpp Script.cpp Signer.cpp \
 	Transactions.cpp \
-    CoinSelection.cpp ReentrantLock.cpp JSON_codec.cpp \
-	TransactionBatch.cpp log.cpp
+	CoinSelection.cpp ReentrantLock.cpp JSON_codec.cpp \
+	TransactionBatch.cpp log.cpp TxEvalState.cpp \
+	bech32/ref/c++/bech32.cpp bech32/ref/c++/segwit_addr.cpp
 
 
 #ArmoryDB

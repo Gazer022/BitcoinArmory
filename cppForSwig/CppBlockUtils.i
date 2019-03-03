@@ -14,6 +14,8 @@
 %module(directors="1") CppBlockUtils
 %feature("director") PythonCallback;
 %feature("director") PythonSigner;
+%feature("director") PythonSigner_BCH;
+%feature("director") UniversalSigner;
 %feature("director") ProcessMutex;
 
 %{
@@ -27,6 +29,7 @@
 #include "WalletManager.h"
 #include "BlockDataManagerConfig.h"
 #include "TransactionBatch.h"
+#include "TxEvalState.h"
 %}
 
 %include "std_string.i"
@@ -45,7 +48,11 @@
 %typedef unsigned long long uint64_t;
 #else
 #if defined(__GNUC__) // Linux
+#if defined(__LP64__) // 64bit
 %typedef long unsigned int uint64_t;
+#else // Linux 32bit
+%typedef long long unsigned int uint64_t;
+#endif
 #else
 %typedef unsigned long long uint64_t;
 #endif
@@ -95,6 +102,15 @@ namespace std
 			"DbErrorMsg", SWIGTYPE_p_DbErrorMsg);
 		SWIG_fail;
 	}
+	catch (RecipientReuseException& e)
+	{
+		SWIG_Python_Raise(SWIG_NewPointerObj(
+			(new RecipientReuseException(static_cast<const RecipientReuseException&>(e))),
+			SWIGTYPE_p_RecipientReuseException, SWIG_POINTER_OWN),
+			"RecipientReuseException", SWIGTYPE_p_RecipientReuseException);
+		SWIG_fail;
+	}
+
 }
 
 
@@ -394,4 +410,5 @@ namespace std
 %include "WalletManager.h"
 %include "BlockDataManagerConfig.h"
 %include "TransactionBatch.h"
+%include "TxEvalState.h"
 

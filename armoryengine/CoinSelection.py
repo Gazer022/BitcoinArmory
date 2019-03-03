@@ -751,40 +751,22 @@ def PySelectCoins(unspentTxOutInfo, targetOutVal, minFee=0, numRand=10, margin=C
    return finalSelection
 
 NBLOCKS_TO_CONFIRM = 3
+FEEBYTE_CONSERVATIVE = "CONSERVATIVE"
+FEEBYTE_ECONOMICAL = "ECONOMICAL"
 # ONE_BTC * 144 / 250
 DEFAULT_PRIORITY = 57600000
 
 ################################################################################
 # Call bitcoin core to get the fee estimate per KB
-def estimateFee(nblocksToConfirm):
+def estimateFee(nblocksToConfirm, strategy):
    # See https://bitcoin.org/en/developer-reference#estimatefee for
    # documentation about this RPC call
-   fee = TheBDM.bdv().estimateFee(nblocksToConfirm)
-   # -1 is returned if BitcoinD does not have enough data to estimate fee.
-   if fee > 0:
-      return int(fee * ONE_BTC)
-   
-   raise Exception("could not get fee/byte from node")
-
+   return TheBDM.bdv().estimateFee(nblocksToConfirm, strategy)
    
 ################################################################################
 # Call bitcoin core to get the priority estimate
 def estimatePriority():
-   result = DEFAULT_PRIORITY
-   try:
-      # See https://bitcoin.org/en/developer-reference#estimatepriority for
-      # documentation about this RPC call
-      priority = BDM.TheSDM.callJSON('estimatepriority', NBLOCKS_TO_CONFIRM)
-      # -1 is returned if BitcoinD does not have enough data to estimate
-      # the priority
-      if priority == -1:
-         result = priority
-   except:
-      # if the BitcoinD version does not support priority estimation
-      # return default
-      # if the BitcoinD was never started return default
-      pass
-   return int(result)
+   return DEFAULT_PRIORITY
 
 ################################################################################
 def calcMinSuggestedFeesHackMS(selectCoinsResult, targetOutVal, preSelectedFee, 
@@ -880,7 +862,7 @@ def approxTxInSizeForTxOut(utxoScript, lboxList=None):
    elif scrType == CPP_TXOUT_P2SH and not lboxList is None:
       scrAddr = script_to_scrAddr(utxoScript)
       for lbox in lboxList:
-         if scrAddr == lbox.p2shScrAddr:
+         if scrAddr == lbox.getAddr():
             M,N,a160s,pubs = getMultisigScriptInfo(lbox.binScript)
             return M*70 + 40
 

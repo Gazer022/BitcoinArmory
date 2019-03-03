@@ -25,6 +25,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 uint8_t BlockDataManagerConfig::pubkeyHashPrefix_;
 uint8_t BlockDataManagerConfig::scriptHashPrefix_;
+string BlockDataManagerConfig::bech32Prefix_;
 
 ////////////////////////////////////////////////////////////////////////////////
 const string BlockDataManagerConfig::dbDirExtention_ = "/databases";
@@ -98,43 +99,52 @@ void BlockDataManagerConfig::selectNetwork(const string &netname)
       genesisBlockHash_ = READHEX(MAINNET_GENESIS_HASH_HEX);
       genesisTxHash_ = READHEX(MAINNET_GENESIS_TX_HASH_HEX);
       magicBytes_ = READHEX(MAINNET_MAGIC_BYTES);
-      btcPort_ = portToString(NODE_PORT_MAINNET);
       rpcPort_ = portToString(RPC_PORT_MAINNET);
       pubkeyHashPrefix_ = SCRIPT_PREFIX_HASH160;
       scriptHashPrefix_ = SCRIPT_PREFIX_P2SH;
+      bech32Prefix_ = "bc";
       
       if (!customFcgiPort_)
          fcgiPort_ = portToString(FCGI_PORT_MAINNET);
+      
+      if(!customBtcPort_)
+         btcPort_ = portToString(NODE_PORT_MAINNET);
    }
    else if (netname == "Test")
    {
       genesisBlockHash_ = READHEX(TESTNET_GENESIS_HASH_HEX);
       genesisTxHash_ = READHEX(TESTNET_GENESIS_TX_HASH_HEX);
       magicBytes_ = READHEX(TESTNET_MAGIC_BYTES);
-      btcPort_ = portToString(NODE_PORT_TESTNET);
       rpcPort_ = portToString(RPC_PORT_TESTNET);
       pubkeyHashPrefix_ = SCRIPT_PREFIX_HASH160_TESTNET;
       scriptHashPrefix_ = SCRIPT_PREFIX_P2SH_TESTNET;
+      bech32Prefix_ = "tb";
 
       testnet_ = true;
       
       if (!customFcgiPort_)
          fcgiPort_ = portToString(FCGI_PORT_TESTNET);
+
+      if (!customBtcPort_)
+         btcPort_ = portToString(NODE_PORT_TESTNET);
    }
    else if (netname == "Regtest")
    {
       genesisBlockHash_ = READHEX(REGTEST_GENESIS_HASH_HEX);
       genesisTxHash_ = READHEX(REGTEST_GENESIS_TX_HASH_HEX);
       magicBytes_ = READHEX(REGTEST_MAGIC_BYTES);
-      btcPort_ = portToString(NODE_PORT_REGTEST);
       rpcPort_ = portToString(RPC_PORT_TESTNET);
       pubkeyHashPrefix_ = SCRIPT_PREFIX_HASH160_TESTNET;
       scriptHashPrefix_ = SCRIPT_PREFIX_P2SH_TESTNET;
+      bech32Prefix_ = "tb";
 
       regtest_ = true;
       
       if (!customFcgiPort_)
          fcgiPort_ = portToString(FCGI_PORT_REGTEST);
+
+      if (!customBtcPort_)
+         btcPort_ = portToString(NODE_PORT_REGTEST);
    }
 }
 
@@ -190,7 +200,7 @@ void BlockDataManagerConfig::parseArgs(int argc, char* argv[])
    --satoshi-datadir: path to blockchain data folder (blkXXXXX.dat files)
 
    --ram_usage: defines the ram use during scan operations. 1 level averages
-   128MB of ram (without accounting the base amount, ~400MB). Defaults at 4.
+   128MB of ram (without accounting the base amount, ~400MB). Defaults at 50.
    Can't be lower than 1. Can be changed in between processes
 
    --thread-count: defines how many processing threads can be used during db
@@ -217,6 +227,12 @@ void BlockDataManagerConfig::parseArgs(int argc, char* argv[])
    --fcgi-port: sets the DB listening port.
 
    --clear-mempool: delete all zero confirmation transactions from the DB.
+
+   --satoshirpc-port: set node rpc port
+
+   --listen-all: listen to all incoming IPs (not just localhost)
+
+   --satoshi-port: set Bitcoin node port
 
    ***/
 
@@ -375,7 +391,7 @@ void BlockDataManagerConfig::parseArgs(int argc, char* argv[])
 void BlockDataManagerConfig::processArgs(const map<string, string>& args, 
    bool onlyDetectNetwork)
 {
-   //port
+   //server networking
    auto iter = args.find("fcgi-port");
    if (iter != args.end())
    {
@@ -395,6 +411,19 @@ void BlockDataManagerConfig::processArgs(const map<string, string>& args,
       }
    }
 
+   iter = args.find("listen-all");
+   if (iter != args.end())
+   {
+      listen_all_ = true;
+   }
+
+   iter = args.find("satoshi-port");
+   if (iter != args.end())
+   {
+      btcPort_ = stripQuotes(iter->second);
+      customBtcPort_ = true;
+   }
+
    //network type
    iter = args.find("testnet");
    if (iter != args.end())
@@ -411,6 +440,25 @@ void BlockDataManagerConfig::processArgs(const map<string, string>& args,
       else
       {
          selectNetwork("Main");
+      }
+   }
+
+   //rpc port
+   iter = args.find("satoshirpc-port");
+   if (iter != args.end())
+   {
+      auto value = stripQuotes(iter->second);
+      int portInt = 0;
+      stringstream portSS(value);
+      portSS >> portInt;
+
+      if (portInt < 1 || portInt > 65535)
+      {
+         cout << "Invalid satoshi rpc port, falling back to default" << endl;
+      }
+      else
+      {
+         rpcPort_ = value;
       }
    }
 
@@ -760,6 +808,11 @@ vector<BinaryData> ConfigFile::fleshOutArgs(
 
    //complete config file path
    string configFile_path = BlockDataManagerConfig::defaultDataDir_;
+   if (keyValMap.find("--testnet") != keyValMap.end())
+      configFile_path = BlockDataManagerConfig::defaultTestnetDataDir_;
+   else if (keyValMap.find("--regtest") != keyValMap.end())
+      configFile_path = BlockDataManagerConfig::defaultRegtestDataDir_;
+
    auto datadir_iter = keyValMap.find("--datadir");
    if (datadir_iter != keyValMap.end() && datadir_iter->second.size() > 0)
       configFile_path = datadir_iter->second;
@@ -859,8 +912,15 @@ bool NodeChainState::processState(
       return false;
 
    pct_ = min(pct_val->val_, 1.0);
+   auto pct_int = unsigned(pct_ * 10000.0);
+   
+   if (pct_int != prev_pct_int_)
+   {
+      LOGINFO << "waiting on node sync: " << float(pct_ * 100.0) << "%";
+      prev_pct_int_ = pct_int;
+   }
 
-   if (pct_ >= 0.999)
+   if (pct_ >= 0.9995)
    {
       state_ = ChainStatus_Ready;
       return true;
@@ -871,8 +931,11 @@ bool NodeChainState::processState(
       return false;
 
    uint64_t now = time(0);
+   uint64_t diff = 0;
+
    auto blocktime = get<1>(heightTimeVec_.back());
-   auto diff = now - blocktime;
+   if (now > blocktime)
+      diff = now - blocktime;
 
    //we got this far, node is still syncing, let's compute progress and eta
    state_ = ChainStatus_Syncing;
@@ -897,6 +960,8 @@ bool NodeChainState::processState(
    auto timediff = time_end - time_begin;
    blockSpeed_ = float(blockdiff) / float(timediff);
    eta_ = uint64_t(float(blocksLeft) * blockSpeed_);
+   
+   blocksLeft_ = blocksLeft;
 
    return true;
 }
@@ -947,6 +1012,7 @@ BinaryData NodeChainState::serialize() const
    bw.put_double(blockSpeed_);
    bw.put_uint64_t(eta_);
    bw.put_double(pct_);
+   bw.put_uint32_t(blocksLeft_);
 
    return bw.getData();
 }
@@ -962,6 +1028,9 @@ void NodeChainState::unserialize(const BinaryData& bd)
    blockSpeed_ = float(brr.get_double());
    eta_ = brr.get_uint64_t();
    pct_ = brr.get_double();
+
+   if (brr.getSizeRemaining() >= 4)
+      blocksLeft_ = brr.get_uint32_t();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

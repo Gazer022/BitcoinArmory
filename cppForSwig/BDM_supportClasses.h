@@ -260,10 +260,10 @@ public:
       return scrAddrMap_->get(); 
    }
 
-   map<TxOutScriptRef, int> getOutScrRefMap(void)
+   shared_ptr<map<TxOutScriptRef, int>> getOutScrRefMap(void)
    {
       getScrAddrCurrentSyncState();
-      map<TxOutScriptRef, int> outset;
+      auto outset = make_shared<map<TxOutScriptRef, int>>();
 
       auto scrAddrMap = scrAddrMap_->get();
 
@@ -275,7 +275,7 @@ public:
          TxOutScriptRef scrRef;
          scrRef.setRef(scrAddr.first.scrAddr_);
 
-         outset.insert(move(make_pair(scrRef, scrAddr.second)));
+         outset->insert(move(make_pair(scrRef, scrAddr.second)));
       }
 
       return outset;
@@ -347,8 +347,8 @@ public:
 protected:
    virtual bool bdmIsRunning() const=0;
    virtual BinaryData applyBlockRangeToDB(
-      uint32_t startBlock, uint32_t endBlock, const vector<string>& wltIDs
-   )=0;
+      uint32_t startBlock, uint32_t endBlock, const vector<string>& wltIDs,
+      bool reportProgress)=0;
    virtual uint32_t currentTopBlockHeight() const=0;
    virtual void wipeScrAddrsSSH(const vector<BinaryData>& saVec) = 0;
    virtual shared_ptr<Blockchain> blockchain(void) = 0;
@@ -413,6 +413,9 @@ private:
    //<zcKey, vector<ScrAddr>>
    TransactionalMap<HashString, set<HashString>> keyToSpentScrAddr_;
    map<BinaryData, set<BinaryData>> keyToFundedScrAddr_;
+
+   //
+   map<string, pair<bool, set<BinaryData>>> flaggedBDVs_;
    
    BinaryData lastParsedBlockHash_;
    std::atomic<uint32_t> topId_;

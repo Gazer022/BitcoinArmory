@@ -25,6 +25,8 @@
 #include "BinaryData.h"
 #include "EncryptionUtils.h"
 #include "BtcUtils.h"
+#include "SigHashEnum.h"
+#include "TxEvalState.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 class ScriptException : public runtime_error
@@ -221,7 +223,12 @@ private:
    BinaryData p2shScript_;
 
    shared_ptr<SigHashDataSegWit> SHD_SW_ = nullptr;
+
+   TxInEvalState txInEvalState_;
+
+protected:
    shared_ptr<SigHashData> sigHashDataObject_ = nullptr;
+   virtual SIGHASH_TYPE getSigHashSingleByte(uint8_t) const;
 
 private:
    void processOpCode(const OpCode&);
@@ -804,8 +811,24 @@ public:
 
    void processScript(const BinaryDataRef&, bool);
    void processScript(BinaryRefReader&, bool);
+
+   const TxInEvalState& getTxInEvalState(void) const
+   {
+      return txInEvalState_;
+   }
 };
 
+
+////////////////////////////////////////////////////////////////////////////////
+class StackInterpreter_BCH : public StackInterpreter
+{
+protected:
+   SIGHASH_TYPE getSigHashSingleByte(uint8_t) const;
+
+public:
+   StackInterpreter_BCH(void);
+   StackInterpreter_BCH(const TransactionStub* stubPtr, unsigned inputId);
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 struct ReversedStackEntry;
@@ -938,9 +961,38 @@ public:
 class ResolverFeed
 {
 public:
+   virtual ~ResolverFeed(void) = 0;
 
    virtual BinaryData getByVal(const BinaryData&) = 0;
    virtual const SecureBinaryData& getPrivKeyForPubkey(const BinaryData&) = 0;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+class ResolverFeedPublic : public ResolverFeed
+{
+   //can only return public wallet data
+
+private:
+   ResolverFeed* feedPtr_ = nullptr;
+
+public:
+   ResolverFeedPublic(ResolverFeed* feedPtr) :
+      feedPtr_(feedPtr)
+   {}
+
+   BinaryData getByVal(const BinaryData& key)
+   {
+      if (feedPtr_ == nullptr)
+         throw runtime_error("invalid value");
+
+      return feedPtr_->getByVal(key);
+   }
+
+   const SecureBinaryData& getPrivKeyForPubkey(const BinaryData& key)
+   {
+      throw runtime_error("invalid value");
+      return SecureBinaryData();
+   }
 };
 
 enum StackItemType
